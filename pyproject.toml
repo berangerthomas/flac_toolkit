@@ -1,0 +1,10 @@
+[project]
+name = "flac_toolkit"
+version = "0.1.0"
+description = "Flac Toolkit"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "mutagen>=1.47.0",
+    "unidecode>=1.4.0",
+]
