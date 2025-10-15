@@ -64,6 +64,10 @@ python main.py [mode] [target_paths]...
 
 The analysis report for each file includes the following sections:
 
+![Example Analysis Output](docs/example_1.jpg)
+
+*Example screenshot showing the detailed analysis output for a FLAC file*
+
 *   **Status:** Overall file validity assessment.
 *   **Audio Information:** Basic metadata like duration, sample rate, and channels.
 *   **Metadata Block Structure:** Technical view of the file's internal metadata structure.
