@@ -1,10 +1,17 @@
 [project]
 name = "flac_toolkit"
-version = "0.1.0"
-description = "Flac Toolkit"
+version = "1.0.0"
+description = "Command-line utility for FLAC audio file analysis, repair, and replay gain normalization."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "mutagen>=1.47.0",
-    "unidecode>=1.4.0",
+    "mutagen==1.47.0",
+    "unidecode==1.3.8",
+    "pyloudnorm==0.1.1",
+    "soundfile==0.12.1",
+    "numpy==1.26.4",
+    "pandas==2.2.2",
+    "typer==0.12.3",
+    "tqdm==4.66.4",
+    "pathvalidate==3.2.0",
 ]
