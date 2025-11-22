@@ -1,8 +1,9 @@
 import logging
-import typer
+import argparse
+import sys
 from pathlib import Path
-from typing import List, Optional
-from concurrent.futures import ProcessPoolExecutor
+from typing import List
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from collections import defaultdict
 from mutagen.flac import FLAC
 
@@ -14,37 +15,39 @@ from flac_toolkit.reporter import print_analysis_result, print_summary
 from flac_toolkit.dataframe import create_dataframe, generate_html_report
 from tqdm import tqdm
 
-app = typer.Typer(help="FLAC Toolkit - Advanced diagnosis, repair, and ReplayGain tool.")
-
-@app.callback()
-def main(
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose (debug) output."),
-    quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress all output except errors.")
-):
-    """
-    Global configuration callback.
-    """
-    setup_logging(verbose, quiet)
-
-@app.command()
-def analyze(
-    target_paths: List[Path] = typer.Argument(..., help="One or more files or directories to process."),
-    workers: Optional[int] = typer.Option(None, "--workers", "-w", help="Number of parallel workers."),
-    output_html: Path = typer.Option(Path("flac_analysis_report.html"), "--output", "-o", help="Path to the output HTML report.")
-):
+def analyze(args):
     """
     Perform an in-depth analysis of each file and generate an HTML report.
     """
     logging.info("ANALYZE Mode - In-depth analysis\n" + "=" * 50)
     
+    workers = args.workers
+    output_html = args.output
+    target_paths = [Path(p) for p in args.target_paths]
+
     files = list(find_flac_files(target_paths))
     if not files:
         logging.warning("No FLAC files found.")
         return
 
-    # Parallel analysis
-    with ProcessPoolExecutor(max_workers=workers) as executor:
-        results = list(tqdm(executor.map(analyze_flac_comprehensive, files), total=len(files), unit="file"))
+    # Analysis execution
+    if workers is not None and workers == 1:
+        # Sequential execution (no overhead, smooth progress bar)
+        tqdm.write("Running in sequential mode (1 worker).")
+        # miniters=1 and mininterval=0.0 force tqdm to update the display after EVERY file
+        results = [analyze_flac_comprehensive(f) for f in tqdm(files, unit="file", miniters=1, mininterval=0.0, file=sys.stdout)]
+    else:
+        # Parallel execution
+        import os
+        effective_workers = workers if workers else os.cpu_count()
+        tqdm.write(f"Running in parallel mode ({effective_workers} workers).")
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            # Submit all tasks
+            futures = [executor.submit(analyze_flac_comprehensive, f) for f in files]
+            results = []
+            # Process results as they complete (fixes progress bar jumps caused by slow files blocking the queue in map)
+            for future in tqdm(as_completed(futures), total=len(files), unit="file", miniters=1, mininterval=0.0, file=sys.stdout):
+                results.append(future.result())
     
     # Console Output
     for r in results:
@@ -57,15 +60,14 @@ def analyze(
     generate_html_report(df, output_html)
 
 
-@app.command()
-def repair(
-    target_paths: List[Path] = typer.Argument(..., help="One or more files or directories to process."),
-    force: bool = typer.Option(False, "--force", help="Force re-encoding on all files."),
-    workers: Optional[int] = typer.Option(None, "--workers", "-w", help="Number of parallel workers.")
-):
+def repair(args):
     """
     Repair files based on analysis. Use --force to re-encode all.
     """
+    force = args.force
+    workers = args.workers
+    target_paths = [Path(p) for p in args.target_paths]
+    
     if force:
         logging.info("REPAIR Mode (Forced) - Re-encoding all files\n" + "=" * 50)
     else:
@@ -98,14 +100,13 @@ def repair(
 
     logging.info("\nRepair process completed.")
 
-@app.command()
-def replaygain(
-    target_paths: List[Path] = typer.Argument(..., help="One or more files or directories to process."),
-    assume_album: bool = typer.Option(False, "--assume-album", help="Treat all files as one album.")
-):
+def replaygain(args):
     """
     Calculate and apply ReplayGain tags.
     """
+    assume_album = args.assume_album
+    target_paths = [Path(p) for p in args.target_paths]
+    
     logging.info("REPLAYGAIN Mode - Calculate and apply track/album ReplayGain\n" + "=" * 50)
 
     files = list(find_flac_files(target_paths))
@@ -135,5 +136,49 @@ def replaygain(
         process_album(album_files)
 
 
+def main():
+    parser = argparse.ArgumentParser(
+        prog='flac_toolkit',
+        description='FLAC Toolkit - Advanced diagnosis, repair, and ReplayGain tool.'
+    )
+    
+    # Global options
+    parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose (debug) output.')
+    parser.add_argument('-q', '--quiet', action='store_true', help='Suppress all output except errors.')
+    
+    # Subcommands
+    subparsers = parser.add_subparsers(dest='command', required=True, help='Available commands')
+    
+    # Analyze command
+    analyze_parser = subparsers.add_parser('analyze', help='Perform an in-depth analysis of each file and generate an HTML report.')
+    analyze_parser.add_argument('target_paths', nargs='+', help='One or more files or directories to process.')
+    analyze_parser.add_argument('-w', '--workers', type=int, default=None, help='Number of parallel workers.')
+    analyze_parser.add_argument('-o', '--output', type=str, default='flac_analysis_report.html', help='Path to the output HTML report.')
+    
+    # Repair command
+    repair_parser = subparsers.add_parser('repair', help='Repair files based on analysis. Use --force to re-encode all.')
+    repair_parser.add_argument('target_paths', nargs='+', help='One or more files or directories to process.')
+    repair_parser.add_argument('--force', action='store_true', help='Force re-encoding on all files.')
+    repair_parser.add_argument('-w', '--workers', type=int, default=None, help='Number of parallel workers.')
+    
+    # ReplayGain command
+    replaygain_parser = subparsers.add_parser('replaygain', help='Calculate and apply ReplayGain tags.')
+    replaygain_parser.add_argument('target_paths', nargs='+', help='One or more files or directories to process.')
+    replaygain_parser.add_argument('--assume-album', action='store_true', help='Treat all files as one album.')
+    
+    args = parser.parse_args()
+    
+    # Setup logging based on global flags
+    setup_logging(args.verbose, args.quiet)
+    
+    # Dispatch to the appropriate command
+    if args.command == 'analyze':
+        analyze(args)
+    elif args.command == 'repair':
+        repair(args)
+    elif args.command == 'replaygain':
+        replaygain(args)
+
+
 if __name__ == "__main__":
-    app()
+    main()

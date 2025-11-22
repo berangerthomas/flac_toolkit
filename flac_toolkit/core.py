@@ -16,7 +16,14 @@ def setup_logging(verbose: bool = False, quiet: bool = False):
     log_format = '%(message)s' if log_level > logging.DEBUG else '%(levelname)s: %(message)s'
     
     # Basic configuration
-    logging.basicConfig(level=log_level, format=log_format, stream=sys.stdout)
+    # Force reconfiguration of the root logger to ensure our settings are applied
+    root = logging.getLogger()
+    if root.handlers:
+        for handler in root.handlers[:]:
+            root.removeHandler(handler)
+
+    # Send logging output to stderr so it doesn't get overwritten by tqdm on stdout
+    logging.basicConfig(level=log_level, format=log_format, stream=sys.stderr)
 
 def find_flac_files(target_paths: List[Path]) -> Iterator[Path]:
     """Recursively search for FLAC files in given paths."""
