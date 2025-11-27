@@ -60,6 +60,24 @@ def analyze(args):
     generate_html_report(df, output_html)
 
 
+def repair_worker(file_path: Path, force: bool):
+    if force:
+        reencode_flac(file_path)
+        return
+
+    analysis = analyze_flac_comprehensive(file_path)
+    if not analysis['repair_suggestions']:
+        logging.debug(f"OK: {file_path.name}")
+        return
+    
+    logging.info(f"Issues found in: {file_path.name}")
+    for suggestion in analysis['repair_suggestions']:
+        if suggestion['action'] == 'reencode':
+            reencode_flac(file_path)
+        elif suggestion['action'] == 'rename':
+            repair_filename(file_path)
+
+
 def repair(args):
     """
     Repair files based on analysis. Use --force to re-encode all.
@@ -78,25 +96,23 @@ def repair(args):
         logging.warning("No FLAC files found.")
         return
 
-    def repair_worker(file_path: Path):
-        if force:
-            reencode_flac(file_path)
-            return
+    # Limit workers to ProcessPoolExecutor's maximum (61 on Windows)
+    if workers is not None and workers > 61:
+        logging.warning(f"Requested {workers} workers exceeds system limit. Capping at 61.")
+        workers = 61
 
-        analysis = analyze_flac_comprehensive(file_path)
-        if not analysis['repair_suggestions']:
-            logging.debug(f"OK: {file_path.name}")
-            return
-        
-        logging.info(f"Issues found in: {file_path.name}")
-        for suggestion in analysis['repair_suggestions']:
-            if suggestion['action'] == 'reencode':
-                reencode_flac(file_path)
-            elif suggestion['action'] == 'rename':
-                repair_filename(file_path)
-
-    with ProcessPoolExecutor(max_workers=workers) as executor:
-        list(tqdm(executor.map(repair_worker, files), total=len(files), unit="file", desc="Processing"))
+    if workers is not None and workers == 1:
+        tqdm.write("Running in sequential mode (1 worker).")
+        for f in tqdm(files, unit="file", miniters=1, mininterval=0.0, file=sys.stdout):
+            repair_worker(f, force)
+    else:
+        import os
+        effective_workers = workers if workers else os.cpu_count()
+        tqdm.write(f"Running in parallel mode ({effective_workers} workers).")
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(repair_worker, f, force) for f in files]
+            for future in tqdm(as_completed(futures), total=len(files), unit="file", miniters=1, mininterval=0.0, file=sys.stdout):
+                future.result()
 
     logging.info("\nRepair process completed.")
 
