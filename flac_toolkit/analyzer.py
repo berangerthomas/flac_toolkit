@@ -206,7 +206,11 @@ def _calculate_audio_md5(file_path: Path, bits_per_sample: int) -> Tuple[Optiona
         return md5.hexdigest(), None
 
     except Exception as e:
-        return None, str(e)
+        error_msg = str(e)
+        # Detect common libsndfile I/O errors
+        if "psf_fseek" in error_msg or "psf_fread" in error_msg:
+            error_msg = f"libsndfile I/O error (file may be corrupted or truncated): {error_msg}"
+        return None, error_msg
 
 def _generate_repair_suggestions(result: Dict[str, Any]) -> List[Dict[str, str]]:
         suggestions = []

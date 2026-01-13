@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-01-13
+
+### Added
+
+- **Dedupe mode**: New command to detect duplicate FLAC files in your library
+  - Audio-based duplicate detection using FLAC MD5 audio signatures
+  - Automatic MD5 calculation for files with missing signatures
+  - Strict duplicate detection (byte-for-byte identical files) using SHA256
+  - **Interactive HTML report** (`flac_duplicate_report.html`) with sorting and filtering
+  - Console summary distinguishing "strict duplicates" from "audio-only duplicates"
+  - `-o`/`--output` option for custom report path
+
+### Improved
+
+- Clearer error messages when `libsndfile` fails to read files (corruption, truncation)
+
 ## [0.1.0] - 2026-01-13
 
 ### Added

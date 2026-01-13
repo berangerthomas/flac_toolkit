@@ -15,6 +15,10 @@ A command-line tool for the analysis and repair of FLAC audio files. This tool i
   * Preserves original filenames for repaired files.
   * Falls back to `ffmpeg` if `flac` is not available.
 * **ReplayGain Calculation:** Applies track and album ReplayGain tags based on the EBU R 128 standard (-18 LUFS).
+* **Duplicate Detection (`dedupe` mode):**
+  * Scans audio MD5 signatures to find files with identical audio content.
+  * Distinguishes **strict duplicates** (byte-for-byte identical) from **audio-only duplicates** (same audio, different metadata).
+  * Helps clean up libraries with multiple copies of the same tracks.
 * **Status Classification:** Classifies files as `VALID`, `VALID (with warnings)`, or `INVALID`.
 
 ## Prerequisites
@@ -56,10 +60,14 @@ python main.py [mode] [options] [TARGET_PATHS]...
   * **Seamless Replacement:** The repaired file replaces the original with the same name.
   * Use `--force` to re-encode all target files, regardless of their status.
 * `replaygain`: Calculates and applies ReplayGain tags (both track and album) to the target files.
+* `dedupe`: Scans for duplicate files based on audio content.
+  * Generates an interactive **HTML Report** (`flac_duplicate_report.html`) by default.
+  * **Audio-Only Duplicates:** Files with identical audio but different metadata or filenames.
+  * **Strict Duplicates:** Files that are byte-for-byte identical.
 
 ### Options
 
-* `--output`, `-o`: Used with `analyze` mode. Specify the output path for the HTML report (default: `flac_analysis_report.html`).
+* `--output`, `-o`: Used with `analyze` and `dedupe` modes. Specify the output path for the HTML report.
 * `--force`: Used with `repair` mode. Forces re-encoding of all files, even if they are valid.
 * `--assume-album`: Used with `replaygain` mode. Treats all processed files as a single album for ReplayGain calculation.
 * `-w`, `--workers`: Number of parallel workers for faster processing.
@@ -96,6 +104,12 @@ python main.py [mode] [options] [TARGET_PATHS]...
 
   ```bash
   python main.py replaygain path/to/an_album/
+  ```
+
+* **Find duplicate files in your library:**
+
+  ```bash
+  python main.py dedupe path/to/my_library/
   ```
 
 ## Understanding the `analyze` Output

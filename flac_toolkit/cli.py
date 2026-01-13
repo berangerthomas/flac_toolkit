@@ -13,6 +13,7 @@ from flac_toolkit.repair import repair_filename, reencode_flac
 from flac_toolkit.replaygain import process_album
 from flac_toolkit.reporter import print_analysis_result, print_summary
 from flac_toolkit.dataframe import create_dataframe, generate_html_report
+from flac_toolkit.dedupe import find_duplicates, print_duplicate_report, generate_dedupe_html_report
 from tqdm import tqdm
 
 def analyze(args):
@@ -151,6 +152,21 @@ def replaygain(args):
         logging.info(f"\n--- Processing Album: {album_name} ({len(album_files)} tracks) ---")
         process_album(album_files)
 
+def dedupe(args):
+    """
+    Find duplicate FLAC files.
+    """
+    logging.info("DEDUPE Mode - Scanning for duplicates\n" + "=" * 50)
+    target_paths = [Path(p) for p in args.target_paths]
+    output_html = args.output
+    
+    results = find_duplicates(target_paths)
+    print_duplicate_report(results)
+    
+    # Generate HTML Report
+    if results:
+        logging.info("\nGenerating HTML report...")
+        generate_dedupe_html_report(results, Path(output_html))
 
 def main():
     parser = argparse.ArgumentParser(
@@ -182,6 +198,11 @@ def main():
     replaygain_parser.add_argument('target_paths', nargs='+', help='One or more files or directories to process.')
     replaygain_parser.add_argument('--assume-album', action='store_true', help='Treat all files as one album.')
     
+    # Dedupe command
+    dedupe_parser = subparsers.add_parser('dedupe', help='Find duplicate FLAC files (strict and audio-only).')
+    dedupe_parser.add_argument('target_paths', nargs='+', help='One or more files or directories to process.')
+    dedupe_parser.add_argument('-o', '--output', type=str, default='flac_duplicate_report.html', help='Path to the output HTML report.')
+    
     args = parser.parse_args()
     
     # Setup logging based on global flags
@@ -190,6 +211,8 @@ def main():
     # Dispatch to the appropriate command
     if args.command == 'analyze':
         analyze(args)
+    elif args.command == 'dedupe':
+        dedupe(args)
     elif args.command == 'repair':
         repair(args)
     elif args.command == 'replaygain':

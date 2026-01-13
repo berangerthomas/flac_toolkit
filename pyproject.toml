@@ -1,6 +1,10 @@
+[build-system]
+requires = ["setuptools>=64", "setuptools_scm>=8"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "flac_toolkit"
-version = "1.0.0"
+dynamic = ["version"]
 description = "Command-line utility for FLAC audio file analysis, repair, and replay gain normalization."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -14,4 +18,13 @@ dependencies = [
     "typer==0.12.3",
     "tqdm==4.66.4",
     "pathvalidate==3.2.0",
+    "build>=1.4.0",
+    "setuptools-scm>=9.2.2",
 ]
+
+[tool.setuptools_scm]
+write_to = "flac_toolkit/_version.py"
+
+[tool.setuptools.packages.find]
+include = ["flac_toolkit*"]
+exclude = ["music*", "docs*", "tests*"]
