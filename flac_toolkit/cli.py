@@ -159,8 +159,9 @@ def dedupe(args):
     logging.info("DEDUPE Mode - Scanning for duplicates\n" + "=" * 50)
     target_paths = [Path(p) for p in args.target_paths]
     output_html = args.output
+    workers = args.workers
     
-    results = find_duplicates(target_paths)
+    results = find_duplicates(target_paths, workers=workers)
     print_duplicate_report(results)
     
     # Generate HTML Report
@@ -202,6 +203,7 @@ def main():
     dedupe_parser = subparsers.add_parser('dedupe', help='Find duplicate FLAC files (strict and audio-only).')
     dedupe_parser.add_argument('target_paths', nargs='+', help='One or more files or directories to process.')
     dedupe_parser.add_argument('-o', '--output', type=str, default='flac_duplicate_report.html', help='Path to the output HTML report.')
+    dedupe_parser.add_argument('-w', '--workers', type=int, default=None, help='Number of parallel workers.')
     
     args = parser.parse_args()
     

@@ -1,8 +1,11 @@
 import hashlib
 import logging
+import os
+import sys
 from pathlib import Path
 from collections import defaultdict
-from typing import List, Dict, NamedTuple, Optional
+from typing import List, Dict, NamedTuple, Optional, Tuple
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
 from mutagen.flac import FLAC
 from flac_toolkit.core import find_flac_files
@@ -21,7 +24,30 @@ def get_file_content_hash(path: Path) -> str:
             sha256_hash.update(byte_block)
     return sha256_hash.hexdigest()
 
-def find_duplicates(target_paths: List[Path]) -> List[DuplicateGroup]:
+
+def _get_audio_signature(file_path: Path) -> Tuple[Path, Optional[str], Optional[str]]:
+    """
+    Worker function to get audio MD5 signature for a single file.
+    Returns (file_path, signature_hex, error_message).
+    """
+    try:
+        audio = FLAC(file_path)
+        sig = audio.info.md5_signature
+        
+        if sig == 0:
+            # If signature is missing in header, calculate it manually
+            calc_sig, err = _calculate_audio_md5(file_path, audio.info.bits_per_sample)
+            if calc_sig:
+                return (file_path, calc_sig, None)
+            else:
+                return (file_path, None, err)
+        else:
+            return (file_path, format(sig, '032x'), None)
+    except Exception as e:
+        return (file_path, None, str(e))
+
+
+def find_duplicates(target_paths: List[Path], workers: Optional[int] = None) -> List[DuplicateGroup]:
     """
     Finds groups of files with identical audio content.
     Within those groups, identifies files that are strictly identical (byte-for-byte).
@@ -33,28 +59,31 @@ def find_duplicates(target_paths: List[Path]) -> List[DuplicateGroup]:
     # Map: Audio MD5 -> List of files
     audio_map = defaultdict(list)
     
-    # Using tqdm for progress feedback
-    pbar = tqdm(files, desc="Scanning audio signatures", unit="file")
-    for f in pbar:
-        try:
-            audio = FLAC(f)
-            sig = audio.info.md5_signature
-            
-            sig_hex = ""
-            if sig == 0:
-                 # If signature is missing in header, calculate it manually
-                 calc_sig, err = _calculate_audio_md5(f, audio.info.bits_per_sample)
-                 if calc_sig:
-                     sig_hex = calc_sig
-                 else:
-                     logging.warning(f"\nSkipping: {f}\n  Reason: {err}")
-                     continue
-            else:
-                 sig_hex = format(sig, '032x')
-            
-            audio_map[sig_hex].append(f)
-        except Exception as e:
-            logging.error(f"\nError reading {f}: {e}")
+    if workers is not None and workers == 1:
+        # Sequential execution
+        tqdm.write("Running in sequential mode (1 worker).")
+        for f in tqdm(files, desc="Scanning audio signatures", unit="file", miniters=1, mininterval=0.0, file=sys.stdout):
+            f, sig_hex, err = _get_audio_signature(f)
+            if err:
+                logging.warning(f"\nSkipping: {f}\n  Reason: {err}")
+            elif sig_hex:
+                audio_map[sig_hex].append(f)
+    else:
+        # Parallel execution
+        effective_workers = workers if workers else os.cpu_count()
+        # Limit workers on Windows
+        if effective_workers and effective_workers > 61:
+            effective_workers = 61
+        tqdm.write(f"Running in parallel mode ({effective_workers} workers).")
+        
+        with ProcessPoolExecutor(max_workers=effective_workers) as executor:
+            futures = [executor.submit(_get_audio_signature, f) for f in files]
+            for future in tqdm(as_completed(futures), total=len(files), desc="Scanning audio signatures", unit="file", miniters=1, mininterval=0.0, file=sys.stdout):
+                file_path, sig_hex, err = future.result()
+                if err:
+                    logging.warning(f"\nSkipping: {file_path}\n  Reason: {err}")
+                elif sig_hex:
+                    audio_map[sig_hex].append(file_path)
 
     results = []
     
@@ -81,7 +110,7 @@ def find_duplicates(target_paths: List[Path]) -> List[DuplicateGroup]:
 
 def print_duplicate_report(results: List[DuplicateGroup]):
     if not results:
-        print("\nNo duplicates found! Great job.")
+        print("\nNo duplicates found!")
         return
 
     print(f"\nFound {len(results)} groups of duplicate audio content.\n")
@@ -131,10 +160,16 @@ def generate_dedupe_html_report(results: List[DuplicateGroup], output_path: Path
     total_duplicate_files = sum(len(g.files) for g in results)
     total_strict_sets = sum(len(g.strict_groups) for g in results)
     
-    # Build table rows
+    # Build table rows - generate distinct colors for groups
+    # Using HSL with fixed saturation/lightness, varying hue
+    def get_group_color(idx: int, total: int) -> str:
+        """Generate a distinct pastel color for each group."""
+        hue = (idx * 137.508) % 360  # Golden angle for good distribution
+        return f"hsl({hue:.0f}, 50%, 95%)"
+    
     table_rows = []
     for group_idx, group in enumerate(results, 1):
-        row_class = "row-even" if group_idx % 2 == 0 else "row-odd"
+        group_color = get_group_color(group_idx, total_groups)
         for f in group.files:
             # Determine duplicate type
             is_strict = any(f in sg for sg in group.strict_groups)
@@ -173,7 +208,7 @@ def generate_dedupe_html_report(results: List[DuplicateGroup], output_path: Path
             )
             
             table_rows.append(f"""
-                <tr class="{row_class}" data-group="{group_idx}">
+                <tr style="background-color: {group_color};" data-group="{group_idx}">
                     <td class="col-group">{group_idx}</td>
                     <td>{file_cell}</td>
                     <td>{folder_cell}</td>
@@ -335,9 +370,7 @@ def generate_dedupe_html_report(results: List[DuplicateGroup], output_path: Path
             }}
             .folder-link:hover {{ opacity: 0.7; }}
             
-            /* Group row coloring */
-            .row-odd {{ background-color: #ffffff; }}
-            .row-even {{ background-color: #f8f9fa; }}
+            /* Group row coloring - distinct colors per group */
             .col-group {{
                 font-weight: 600;
                 text-align: center;

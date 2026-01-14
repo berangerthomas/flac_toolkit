@@ -70,7 +70,7 @@ python main.py [mode] [options] [TARGET_PATHS]...
 * `--output`, `-o`: Used with `analyze` and `dedupe` modes. Specify the output path for the HTML report.
 * `--force`: Used with `repair` mode. Forces re-encoding of all files, even if they are valid.
 * `--assume-album`: Used with `replaygain` mode. Treats all processed files as a single album for ReplayGain calculation.
-* `-w`, `--workers`: Number of parallel workers for faster processing.
+* `-w`, `--workers`: Number of parallel workers for faster processing (available in `analyze`, `repair`, and `dedupe` modes).
 * `-v`, `--verbose`: Enables detailed debug output.
 * `-q`, `--quiet`: Suppresses all informational output, showing only errors.
 
