@@ -30,11 +30,9 @@ A command-line tool for the analysis and repair of FLAC audio files. This tool i
 ## Installation
 
 1. Clone the repository.
-2. Install the required Python packages (e.g., using pip or uv):
+2. Install the required Python packages (e.g., using uv):
 
    ```bash
-   pip install -r requirements.txt 
-   # or if using uv
    uv sync
    ```
 
@@ -111,6 +109,8 @@ python main.py [mode] [options] [TARGET_PATHS]...
   ```bash
   python main.py dedupe path/to/my_library/
   ```
+
+![Duplicates HTML report](docs/audio_duplicates_html_report.jpg)
 
 ## Understanding the `analyze` Output
 
