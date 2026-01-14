@@ -161,15 +161,38 @@ def generate_dedupe_html_report(results: List[DuplicateGroup], output_path: Path
     total_strict_sets = sum(len(g.strict_groups) for g in results)
     
     # Build table rows - generate distinct colors for groups
-    # Using HSL with fixed saturation/lightness, varying hue
-    def get_group_color(idx: int, total: int) -> str:
-        """Generate a distinct pastel color for each group."""
-        hue = (idx * 137.508) % 360  # Golden angle for good distribution
-        return f"hsl({hue:.0f}, 50%, 95%)"
+    # Using 3 alternating colors as requested
+    
+    # CSS classes for alternating colors
+    # Targeting both tr and td with high specificity to override DataTables styles
+    group_css = """
+        table.dataTable tbody tr.group-color-0,
+        table.dataTable tbody tr.group-color-0 > td,
+        table.dataTable tbody tr.group-color-0 > td.sorting_1 {
+            background-color: #e3f2fd !important;
+            box-shadow: none !important;
+        }
+        
+        table.dataTable tbody tr.group-color-1,
+        table.dataTable tbody tr.group-color-1 > td,
+        table.dataTable tbody tr.group-color-1 > td.sorting_1 {
+            background-color: #f1f8e9 !important;
+            box-shadow: none !important;
+        }
+        
+        table.dataTable tbody tr.group-color-2,
+        table.dataTable tbody tr.group-color-2 > td,
+        table.dataTable tbody tr.group-color-2 > td.sorting_1 {
+            background-color: #fff3e0 !important;
+            box-shadow: none !important;
+        }
+    """
     
     table_rows = []
     for group_idx, group in enumerate(results, 1):
-        group_color = get_group_color(group_idx, total_groups)
+        # Determine color class cyclically
+        color_class = f"group-color-{group_idx % 3}"
+
         for f in group.files:
             # Determine duplicate type
             is_strict = any(f in sg for sg in group.strict_groups)
@@ -208,12 +231,12 @@ def generate_dedupe_html_report(results: List[DuplicateGroup], output_path: Path
             )
             
             table_rows.append(f"""
-                <tr style="background-color: {group_color};" data-group="{group_idx}">
+                <tr class="{color_class}" data-group="{group_idx}">
                     <td class="col-group">{group_idx}</td>
                     <td>{file_cell}</td>
                     <td>{folder_cell}</td>
                     <td><span class="status-badge {dup_type_class}">{dup_type}</span></td>
-                    <td class="col-md5">{group.audio_md5[:16]}...</td>
+                    <td class="col-md5" title="{group.audio_md5}">{group.audio_md5[:16]}...</td>
                     <td class="col-truncated" title="{artist}">{artist}</td>
                     <td class="col-truncated" title="{album}">{album}</td>
                     <td class="col-truncated" title="{title}">{title}</td>
@@ -230,6 +253,9 @@ def generate_dedupe_html_report(results: List[DuplicateGroup], output_path: Path
         <script type="text/javascript" charset="utf8" src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
         <script type="text/javascript" charset="utf8" src="https://cdn.datatables.net/1.13.4/js/jquery.dataTables.min.js"></script>
         <style>
+            /* Dynamic group colors */
+            {group_css}
+            
             html, body {{ 
                 height: 100%; 
                 margin: 0; 
@@ -316,6 +342,15 @@ def generate_dedupe_html_report(results: List[DuplicateGroup], output_path: Path
                 padding: 8px 12px !important; 
                 border-bottom: 1px solid #f1f3f5;
                 vertical-align: middle;
+            }}
+            
+            /* Disable DataTables alternating row colors - let inline styles take over */
+            table.dataTable tbody tr,
+            table.dataTable tbody tr.odd,
+            table.dataTable tbody tr.even,
+            table.dataTable.display tbody tr.odd,
+            table.dataTable.display tbody tr.even {{
+                background-color: transparent !important;
             }}
             
             .status-badge {{
@@ -420,6 +455,8 @@ def generate_dedupe_html_report(results: List[DuplicateGroup], output_path: Path
                 scrollY: '100%',
                 scrollCollapse: true,
                 autoWidth: true,
+                stripeClasses: [],
+                orderClasses: false,
                 order: [[0, 'asc'], [3, 'asc']],
                 language: {{
                     search: "Filter:",
