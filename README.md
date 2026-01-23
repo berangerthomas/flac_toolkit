@@ -1,6 +1,10 @@
 # FLAC Toolkit
 
-A command-line tool for the analysis and repair of FLAC audio files. This tool is designed to identify issues from simple metadata inconsistencies to low-level structural corruption.
+A command-line tool for the analysis and repair of FLAC audio files. This tool can :
+* identify issues from invalid filenames, metadata inconsistencies, to low-level structural corruption,
+* repair corrupted FLAC files,
+* calculate and apply album and track ReplayGain tags,
+* detect duplicate tracks, based on audio information.
 
 ## Key Features
 
