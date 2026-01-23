@@ -30,8 +30,31 @@ jobs:
       run: >-
         python3 -m build
 
+    - name: Extract release notes from CHANGELOG
+      id: changelog
+      run: |
+        # Get version from tag (removes 'v' prefix)
+        VERSION="${GITHUB_REF_NAME#v}"
+        echo "Extracting notes for version $VERSION"
+        
+        # Extract the section for this version from CHANGELOG.md
+        # Matches from "## [X.Y.Z]" until the next "## [" or end of file
+        NOTES=$(awk -v ver="$VERSION" '
+          /^## \[/ {
+            if (found) exit
+            if ($0 ~ "\\[" ver "\\]") found=1
+            next
+          }
+          found { print }
+        ' CHANGELOG.md)
+        
+        # Write to file for the release action (handles multiline properly)
+        echo "$NOTES" > release_notes.md
+        echo "Extracted notes:"
+        cat release_notes.md
+
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v1
       with:
         files: dist/*
-        generate_release_notes: true
+        body_path: release_notes.md
