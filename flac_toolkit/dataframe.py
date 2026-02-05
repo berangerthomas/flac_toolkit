@@ -1,4 +1,5 @@
 import logging
+import json
 from pathlib import Path
 from typing import List, Dict, Any
 import pandas as pd
@@ -6,42 +7,23 @@ import pandas as pd
 def create_dataframe(results: List[Dict[str, Any]]) -> pd.DataFrame:
     """
     Generates a pandas DataFrame from a list of analysis results.
+    Data is kept clean (no HTML) for Tabulator.js virtualization.
     """
     data = []
     for res in results:
         path_obj = Path(res['file'])
-        folder_uri = path_obj.parent.as_uri()
-        full_path_str = str(path_obj).replace('\\', '\\\\').replace("'", "\\'") # Escape for JS
-        
-        filename = path_obj.name
-        display_filename = filename
-
-        # Create a copy button and truncated text
-        file_cell = (
-            f'<div class="file-cell">'
-            f'<button class="copy-btn" onclick="copyToClipboard(\'{full_path_str}\')" title="Copy full path">📋</button>'
-            f'<span class="filename-text" title="{filename}">{display_filename}</span>'
-            f'</div>'
-        )
-        
-        # Create folder cell with copy button
-        folder_path_str = str(path_obj.parent).replace('\\', '\\\\').replace("'", "\\'")
-        folder_cell = (
-            f'<div class="file-cell">'
-            f'<button class="copy-btn" onclick="copyToClipboard(\'{folder_path_str}\')" title="Copy folder path">📋</button>'
-            f'<span class="filename-text" title="{path_obj.parent.name}">{path_obj.parent.name}</span>'
-            f'</div>'
-        )
         
         status_order_map = {'INVALID': 0, 'VALID (with warnings)': 1, 'VALID': 2}
         
         row = {
-            'File': file_cell,
-            'Folder': folder_cell,
-            'Status': res['status'],
-            'StatusOrder': status_order_map.get(res['status'], 99),
-            'Errors': '<br>'.join(res['errors']),
-            'Warnings': '<br>'.join(res['warnings']),
+            'file': path_obj.name,
+            'file_path': str(path_obj),
+            'folder': path_obj.parent.name,
+            'folder_path': str(path_obj.parent),
+            'status': res['status'],
+            'status_order': status_order_map.get(res['status'], 99),
+            'errors': '\n'.join(res['errors']),
+            'warnings': '\n'.join(res['warnings']),
         }
         
         # Add metrics
@@ -50,9 +32,8 @@ def create_dataframe(results: List[Dict[str, Any]]) -> pd.DataFrame:
             # Format duration to MM:SS
             if 'duration_seconds' in metrics:
                 d_sec = metrics['duration_seconds']
-                metrics['Duration'] = f"{int(d_sec // 60):02d}:{int(d_sec % 60):02d}"
+                metrics['duration'] = f"{int(d_sec // 60):02d}:{int(d_sec % 60):02d}"
                 del metrics['duration_seconds']
-            
             row.update(metrics)
             
         # Add tags
@@ -62,251 +43,343 @@ def create_dataframe(results: List[Dict[str, Any]]) -> pd.DataFrame:
         data.append(row)
         
     df = pd.DataFrame(data)
-    
-    # Ensure correct column order for JS indexing
-    core_cols = ['File', 'Folder', 'Status', 'StatusOrder', 'Errors', 'Warnings']
-    other_cols = [col for col in df.columns if col not in core_cols]
-    df = df[core_cols + other_cols]
-    
     return df
 
 def generate_html_report(df: pd.DataFrame, output_path: Path):
     """
-    Generates a styled HTML report from the DataFrame.
+    Generates a high-performance HTML report using Tabulator.js with virtual DOM.
+    Handles 100,000+ rows efficiently by only rendering visible rows.
     """
     if df.empty:
         logging.warning("DataFrame is empty, cannot generate HTML report.")
         return
 
-    # Professional styling with Flexbox layout for single scrollbar
-    html_content = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>FLAC Analysis Report</title>
-        <link rel="stylesheet" type="text/css" href="https://cdn.datatables.net/1.13.4/css/jquery.dataTables.min.css">
-        <script type="text/javascript" charset="utf8" src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
-        <script type="text/javascript" charset="utf8" src="https://cdn.datatables.net/1.13.4/js/jquery.dataTables.min.js"></script>
-        <style>
-            html, body {{ 
-                height: 100%; 
-                margin: 0; 
-                padding: 0; 
-                overflow: hidden; /* Prevent body scroll */
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; 
-                font-size: 13px; 
-                color: #333; 
-                background-color: #fff; 
-            }}
-            
-            body {{ 
-                display: flex; 
-                flex-direction: column; 
-                padding: 20px; 
-                box-sizing: border-box; 
-            }}
-            
-            h1 {{ 
-                flex: 0 0 auto;
-                font-size: 18px; 
-                margin: 0 0 15px 0; 
-                color: #2c3e50; 
-                font-weight: 600;
-            }}
-            
-            /* Summary Bar */
-            .summary {{ 
-                flex: 0 0 auto;
-                display: flex; 
-                gap: 25px; 
-                padding: 12px 20px; 
-                background: #f8f9fa; 
-                border: 1px solid #e9ecef;
-                border-radius: 6px; 
-                margin-bottom: 20px;
-                font-size: 13px;
-                align-items: center;
-            }}
-            .summary-item {{ color: #666; }}
-            .summary-item strong {{ color: #333; font-weight: 600; }}
-            
-            /* Table Container - Takes remaining height */
-            #table-container {{
-                flex: 1 1 auto;
-                overflow: hidden; /* Let DataTables handle scroll */
-                display: flex;
-                flex-direction: column;
-            }}
-            
-            /* DataTables Overrides for Flexbox */
-            .dataTables_wrapper {{
-                display: flex;
-                flex-direction: column;
-                height: 100%;
-            }}
-            .dataTables_filter, .dataTables_info {{ flex: 0 0 auto; padding: 5px 0; }}
-            .dataTables_scroll {{ 
-                flex: 1 1 auto; 
-                overflow: hidden; 
-                display: flex; 
-                flex-direction: column;
-            }}
-            .dataTables_scrollHead {{ flex: 0 0 auto; }}
-            .dataTables_scrollBody {{ 
-                flex: 1 1 auto; 
-                border-bottom: 1px solid #dee2e6;
-            }}
-            
-            /* Table Styling */
-            table.dataTable {{ 
-                border-collapse: collapse !important; 
-                width: 100% !important; 
-                border: none;
-                table-layout: auto; /* Allow dynamic sizing */
-            }}
-            table.dataTable thead th {{ 
-                background-color: #f8f9fa !important; 
-                color: #495057 !important; 
-                border-bottom: 2px solid #dee2e6 !important;
-                font-weight: 600;
-                padding: 10px 12px !important;
-                font-size: 12px;
-                text-transform: uppercase;
-                letter-spacing: 0.5px;
-                position: sticky;
-                top: 0;
-                z-index: 10;
-                white-space: nowrap;
-            }}
-            table.dataTable tbody td {{ 
-                padding: 8px 12px !important; 
-                border-bottom: 1px solid #f1f3f5;
-                vertical-align: middle;
-                line-height: 1.4;
-            }}
-            
-            /* Status Badges */
-            .status-badge {{
-                display: inline-block;
-                padding: 3px 8px;
-                border-radius: 12px;
-                font-size: 11px;
-                font-weight: 600;
-                text-transform: uppercase;
-                white-space: nowrap;
-            }}
-            .status-valid {{ background-color: #e6fcf5; color: #0ca678; border: 1px solid #c3fae8; }}
-            .status-invalid {{ background-color: #fff5f5; color: #fa5252; border: 1px solid #ffc9c9; }}
-            .status-warning {{ background-color: #fff9db; color: #f59f00; border: 1px solid #ffec99; }}
-            
-            /* Columns */
-            td.col-errors, td.col-warnings {{ 
-                color: #495057;
-                /* No fixed width, let it grow/shrink, but wrap text */
-                white-space: normal;
-                min-width: 300px; /* Minimum readable width */
-            }}
-            
-            /* Truncated Columns */
-            td.col-truncated {{
-                max-width: 150px; /* Trigger truncation */
-                white-space: nowrap;
-                overflow: hidden;
-                text-overflow: ellipsis;
-                cursor: help; /* Indicate hover capability */
-            }}
-            
-            td.col-duration {{ 
-                white-space: nowrap; 
-                font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
-            }}
-            
-            /* File Cell */
-            .file-cell {{
-                display: flex;
-                align-items: center;
-                gap: 8px;
-                max-width: 350px;
-            }}
-            .filename-text {{
-                white-space: nowrap;
-                overflow: hidden;
-                text-overflow: ellipsis;
-                flex: 1;
-            }}
-            .copy-btn {{
-                background: none;
-                border: 1px solid #dee2e6;
-                border-radius: 4px;
-                cursor: pointer;
-                padding: 2px 6px;
-                font-size: 12px;
-                color: #666;
-            }}
-            .copy-btn:hover {{ background-color: #f1f3f5; color: #333; }}
-            
-            a {{ color: #228be6; text-decoration: none; font-weight: 500; }}
-            a:hover {{ text-decoration: underline; }}
-        </style>
-    </head>
-    <body>
-        <h1>FLAC Analysis Report</h1>
-        
-        <div class="summary">
-            <div class="summary-item"><strong>Total Files:</strong> {len(df)}</div>
-            <div class="summary-item"><strong>Total Size:</strong> {df['filesize_mb'].sum() / 1024:.2f} GB</div>
-            <div class="summary-item"><strong>Invalid:</strong> <span style="color:#fa5252; font-weight:bold;">{len(df[df['Status'] == 'INVALID'])}</span></div>
-        </div>
+    # Convert DataFrame to JSON for Tabulator
+    # Replace NaN with empty strings for JSON serialization
+    df_clean = df.fillna('')
+    data_json = df_clean.to_json(orient='records', force_ascii=False)
+    
+    # Calculate summary stats
+    total_files = len(df)
+    total_size_gb = df['filesize_mb'].sum() / 1024 if 'filesize_mb' in df.columns else 0
+    invalid_count = len(df[df['status'] == 'INVALID'])
+    warning_count = len(df[df['status'] == 'VALID (with warnings)'])
+    valid_count = len(df[df['status'] == 'VALID'])
 
-        <div id="table-container">
-            <table id="flac-table" class="display" style="width:100%">
-                <thead>
-                    <tr>
-                        {''.join(f'<th>{col}</th>' for col in df.columns)}
-                    </tr>
-                </thead>
-                <tbody>
-                    {_generate_table_rows(df)}
-                </tbody>
-            </table>
-        </div>
-
-        <script>
-        function copyToClipboard(text) {{
-            navigator.clipboard.writeText(text).then(function() {{
-                // Optional: Show a small toast or change button color temporarily
-            }}, function(err) {{
-                console.error('Async: Could not copy text: ', err);
-            }});
+    html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>FLAC Analysis Report</title>
+    <link href="https://unpkg.com/tabulator-tables@5.5.2/dist/css/tabulator_simple.min.css" rel="stylesheet">
+    <script type="text/javascript" src="https://unpkg.com/tabulator-tables@5.5.2/dist/js/tabulator.min.js"></script>
+    <style>
+        * {{ box-sizing: border-box; }}
+        html, body {{ 
+            height: 100%; 
+            margin: 0; 
+            padding: 0;
+            overflow: hidden;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; 
+            font-size: 13px; 
+            background-color: #fff; 
+            color: #333;
         }}
-
-        $(document).ready( function () {{
-            $('#flac-table').DataTable({{
-                paging: false,
-                scrollX: true,
-                scrollY: '100%',
-                scrollCollapse: true,
-                autoWidth: true,
-                // Set the default sort order to the StatusOrder column
-                order: [[3, 'asc']],
-                columnDefs: [
-                    // Hide the StatusOrder column (index 3)
-                    {{ "visible": false, "targets": 3 }},
-                    // Tell the Status column (index 2) to use the StatusOrder column for sorting
-                    {{ "orderData": 3, "targets": 2 }}
-                ],
-                language: {{
-                    search: "Filter records:",
-                    info: "Showing _TOTAL_ files"
-                }},
-                dom: 'frti'
-            }});
-        }});
-        </script>
         
-    </body>
-    </html>
-    """
+        body {{ 
+            display: flex; 
+            flex-direction: column; 
+            padding: 20px; 
+        }}
+        
+        h1 {{ 
+            flex: 0 0 auto;
+            font-size: 18px; 
+            margin: 0 0 15px 0; 
+            color: #2c3e50; 
+            font-weight: 600;
+        }}
+        
+        /* Summary Bar */
+        .summary {{ 
+            flex: 0 0 auto;
+            display: flex; 
+            gap: 25px; 
+            padding: 12px 20px; 
+            background: #f8f9fa; 
+            border: 1px solid #e9ecef;
+            border-radius: 6px; 
+            margin-bottom: 15px;
+            font-size: 13px;
+            align-items: center;
+        }}
+        .summary-item {{ color: #666; }}
+        .summary-item strong {{ color: #333; font-weight: 600; }}
+        .stat-valid {{ color: #0ca678; }}
+        .stat-warning {{ color: #f59f00; }}
+        .stat-invalid {{ color: #fa5252; }}
+        
+        /* Search bar */
+        .controls {{
+            flex: 0 0 auto;
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+            align-items: center;
+        }}
+        .search-box {{
+            padding: 8px 12px;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            background: #fff;
+            color: #333;
+            font-size: 13px;
+            width: 300px;
+        }}
+        .search-box::placeholder {{ color: #999; }}
+        .search-box:focus {{ outline: none; border-color: #228be6; }}
+        
+        .filter-btn {{
+            padding: 8px 14px;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            background: #fff;
+            color: #666;
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.15s;
+        }}
+        .filter-btn:hover {{ background: #f8f9fa; color: #333; border-color: #adb5bd; }}
+        .filter-btn.active {{ background: #228be6; color: #fff; border-color: #228be6; }}
+        
+        /* Table container */
+        #table-container {{
+            flex: 1 1 auto;
+            min-height: 0;
+        }}
+        
+        /* Tabulator overrides for light theme */
+        .tabulator {{
+            background-color: #fff;
+            border: 1px solid #dee2e6;
+            border-radius: 6px;
+            font-size: 13px;
+        }}
+        .tabulator-header {{
+            background-color: #f8f9fa;
+            border-bottom: 2px solid #dee2e6;
+        }}
+        .tabulator-header .tabulator-col {{
+            background-color: #f8f9fa;
+            border-right: 1px solid #e9ecef;
+        }}
+        .tabulator-header .tabulator-col-content {{
+            padding: 10px 12px;
+        }}
+        .tabulator-header .tabulator-col-title {{
+            font-weight: 600;
+            color: #495057;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }}
+        .tabulator-tableholder {{
+            background: #fff;
+        }}
+        .tabulator-row {{
+            border-bottom: 1px solid #f1f3f5;
+        }}
+        .tabulator-row:hover {{
+            background-color: #f8f9fa !important;
+        }}
+        .tabulator-row.tabulator-row-even {{
+            background-color: #fff;
+        }}
+        .tabulator-row.tabulator-row-odd {{
+            background-color: #fcfcfc;
+        }}
+        .tabulator-cell {{
+            padding: 8px 12px;
+            border-right: none;
+        }}
+        
+        /* Status badges - original style */
+        .status-badge {{
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            white-space: nowrap;
+        }}
+        .status-valid {{ background-color: #e6fcf5; color: #0ca678; border: 1px solid #c3fae8; }}
+        .status-invalid {{ background-color: #fff5f5; color: #fa5252; border: 1px solid #ffc9c9; }}
+        .status-warning {{ background-color: #fff9db; color: #f59f00; border: 1px solid #ffec99; }}
+        
+        /* Copy button */
+        .copy-btn {{
+            background: none;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            cursor: pointer;
+            padding: 2px 6px;
+            font-size: 12px;
+            color: #666;
+            margin-right: 6px;
+            transition: all 0.15s;
+        }}
+        .copy-btn:hover {{ background: #f1f3f5; color: #333; }}
+        
+        /* Cell styles */
+        .cell-errors {{ color: #e03131; white-space: pre-wrap; font-size: 12px; }}
+        .cell-warnings {{ color: #e67700; white-space: pre-wrap; font-size: 12px; }}
+        .cell-file {{ display: flex; align-items: center; }}
+        
+        /* Toast notification */
+        .toast {{
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            background: #333;
+            color: #fff;
+            padding: 12px 24px;
+            border-radius: 6px;
+            opacity: 0;
+            transition: opacity 0.3s;
+            z-index: 1000;
+            font-size: 13px;
+        }}
+        .toast.show {{ opacity: 1; }}
+    </style>
+</head>
+<body>
+    <h1>FLAC Analysis Report</h1>
+    
+    <div class="summary">
+        <div class="summary-item"><strong>Total Files:</strong> {total_files:,}</div>
+        <div class="summary-item"><strong>Total Size:</strong> {total_size_gb:.2f} GB</div>
+        <div class="summary-item stat-valid"><strong>Valid:</strong> {valid_count:,}</div>
+        <div class="summary-item stat-warning"><strong>Warnings:</strong> {warning_count:,}</div>
+        <div class="summary-item stat-invalid"><strong>Invalid:</strong> {invalid_count:,}</div>
+    </div>
+    
+    <div class="controls">
+        <input type="text" id="search-input" class="search-box" placeholder="Filter records...">
+        <button class="filter-btn active" data-filter="all">All</button>
+        <button class="filter-btn" data-filter="INVALID">Invalid</button>
+        <button class="filter-btn" data-filter="VALID (with warnings)">Warnings</button>
+        <button class="filter-btn" data-filter="VALID">Valid</button>
+    </div>
+
+    <div id="table-container"></div>
+    <div id="toast" class="toast">Path copied!</div>
+
+    <script>
+    const tableData = {data_json};
+    
+    function showToast(msg) {{
+        const toast = document.getElementById('toast');
+        toast.textContent = msg;
+        toast.classList.add('show');
+        setTimeout(() => toast.classList.remove('show'), 2000);
+    }}
+    
+    function copyToClipboard(text) {{
+        navigator.clipboard.writeText(text).then(() => showToast('Path copied!'));
+    }}
+    
+    // Status formatter with badge
+    function statusFormatter(cell) {{
+        const value = cell.getValue();
+        if (value === 'VALID') {{
+            return '<span class="status-badge status-valid">Valid</span>';
+        }} else if (value === 'INVALID') {{
+            return '<span class="status-badge status-invalid">Invalid</span>';
+        }} else {{
+            return '<span class="status-badge status-warning">Warning</span>';
+        }}
+    }}
+    
+    // File cell with copy button
+    function fileFormatter(cell) {{
+        const row = cell.getRow().getData();
+        const fullPath = row.file_path || '';
+        return `<div class="cell-file"><button class="copy-btn" onclick="copyToClipboard('${{fullPath.replace(/\\\\/g, '\\\\\\\\').replace(/'/g, "\\\\'")}}')" title="Copy path">📋</button>${{cell.getValue()}}</div>`;
+    }}
+    
+    // Folder cell with copy button  
+    function folderFormatter(cell) {{
+        const row = cell.getRow().getData();
+        const folderPath = row.folder_path || '';
+        return `<div class="cell-file"><button class="copy-btn" onclick="copyToClipboard('${{folderPath.replace(/\\\\/g, '\\\\\\\\').replace(/'/g, "\\\\'")}}')" title="Copy path">📋</button>${{cell.getValue()}}</div>`;
+    }}
+
+    // Initialize Tabulator with virtual DOM
+    const table = new Tabulator("#table-container", {{
+        data: tableData,
+        height: "100%",
+        layout: "fitDataStretch",
+        virtualDom: true,
+        virtualDomBuffer: 300,
+        placeholder: "No matching records found",
+        initialSort: [{{ column: "status_order", dir: "asc" }}],
+        columns: [
+            {{ title: "File", field: "file", formatter: fileFormatter, minWidth: 250, headerFilter: false }},
+            {{ title: "Folder", field: "folder", formatter: folderFormatter, minWidth: 150 }},
+            {{ title: "Status", field: "status", formatter: statusFormatter, width: 110, hozAlign: "center" }},
+            {{ title: "", field: "status_order", visible: false }},
+            {{ title: "Errors", field: "errors", formatter: "html", cssClass: "cell-errors", minWidth: 300, formatter: function(cell) {{
+                return '<div class="cell-errors">' + (cell.getValue() || '').replace(/\\n/g, '<br>') + '</div>';
+            }} }},
+            {{ title: "Warnings", field: "warnings", minWidth: 250, formatter: function(cell) {{
+                return '<div class="cell-warnings">' + (cell.getValue() || '').replace(/\\n/g, '<br>') + '</div>';
+            }} }},
+            {{ title: "Duration", field: "duration", width: 90, hozAlign: "center" }},
+            {{ title: "Sample Rate", field: "sample_rate", width: 110, hozAlign: "right" }},
+            {{ title: "Bits", field: "bits_per_sample", width: 70, hozAlign: "center" }},
+            {{ title: "Ch", field: "channels", width: 50, hozAlign: "center" }},
+            {{ title: "Bitrate", field: "bitrate_kbps", width: 90, hozAlign: "right", formatter: function(cell) {{
+                return cell.getValue() ? cell.getValue() + ' kbps' : '';
+            }} }},
+            {{ title: "Size (MB)", field: "filesize_mb", width: 100, hozAlign: "right" }},
+            {{ title: "Artist", field: "artist", minWidth: 150 }},
+            {{ title: "Album", field: "album", minWidth: 150 }},
+            {{ title: "Title", field: "title", minWidth: 200 }},
+            {{ title: "Track", field: "tracknumber", width: 70, hozAlign: "center" }},
+            {{ title: "Genre", field: "genre", width: 120 }},
+            {{ title: "Date", field: "date", width: 80 }},
+            {{ title: "RG Gain", field: "replaygain_track_gain", width: 100 }},
+        ],
+    }});
+
+    // Global search
+    document.getElementById('search-input').addEventListener('input', function(e) {{
+        const value = e.target.value.toLowerCase();
+        table.setFilter(function(data) {{
+            return Object.values(data).some(v => 
+                String(v).toLowerCase().includes(value)
+            );
+        }});
+    }});
+    
+    // Status filter buttons
+    document.querySelectorAll('.filter-btn').forEach(btn => {{
+        btn.addEventListener('click', function() {{
+            document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+            this.classList.add('active');
+            
+            const filter = this.dataset.filter;
+            if (filter === 'all') {{
+                table.clearFilter();
+            }} else {{
+                table.setFilter("status", "=", filter);
+            }}
+        }});
+    }});
+    </script>
+</body>
+</html>"""
     
     try:
         with open(output_path, 'w', encoding='utf-8') as f:
@@ -314,41 +387,3 @@ def generate_html_report(df: pd.DataFrame, output_path: Path):
         logging.info(f"HTML report generated: {output_path}")
     except Exception as e:
         logging.error(f"Failed to write HTML report: {e}")
-
-def _generate_table_rows(df: pd.DataFrame) -> str:
-    rows = []
-    # Columns that should NOT be truncated
-    full_cols = {'File', 'Folder', 'Status', 'Errors', 'Warnings', 'md5_header', 'md5_calculated'}
-    
-    for _, row in df.iterrows():
-        cells = []
-        for col in df.columns:
-            val = row[col]
-            str_val = str(val)
-            
-            # Apply specific classes based on column name
-            cls = ""
-            content = str_val
-            title_attr = ""
-            
-            if col == 'Errors':
-                cls = 'col-errors'
-            elif col == 'Warnings':
-                cls = 'col-warnings'
-            elif col == 'Duration':
-                cls = 'col-duration'
-            elif col == 'Status':
-                if val == 'VALID':
-                    content = '<span class="status-badge status-valid">Valid</span>'
-                elif val == 'INVALID':
-                    content = '<span class="status-badge status-invalid">Invalid</span>'
-                else:
-                    content = '<span class="status-badge status-warning">Warning</span>'
-            elif col not in full_cols:
-                # Truncate other columns
-                cls = 'col-truncated'
-                title_attr = f'title="{str_val.replace('"', '&quot;')}"'
-            
-            cells.append(f'<td class="{cls}" {title_attr}>{content}</td>')
-        rows.append(f"<tr>{''.join(cells)}</tr>")
-    return '\n'.join(rows)

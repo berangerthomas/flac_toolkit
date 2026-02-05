@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0] - 2026-02-05
+
+### Changed
+
+- **HTML Report Engine**: Migrated from DataTables to Tabulator.js with virtual DOM rendering
+  - Reports now load instantly regardless of file count (tested with 21,000+ files)
+  - Only visible rows are rendered, enabling smooth scrolling through massive datasets
+
+### Improved
+
+- **Analyze HTML report**: Added quick filter buttons (All / Invalid / Warnings / Valid)
+
 ## [0.2.1] - 2026-01-14
 
 ### Added
