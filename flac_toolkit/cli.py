@@ -20,6 +20,8 @@ def analyze(args):
     """
     Perform an in-depth analysis of each file and generate an HTML report.
     """
+    detailed = getattr(args, 'detailed', False)
+    
     logging.info("ANALYZE Mode - In-depth analysis\n" + "=" * 50)
     
     workers = args.workers
@@ -50,9 +52,10 @@ def analyze(args):
             for future in tqdm(as_completed(futures), total=len(files), unit="file", miniters=1, mininterval=0.0, file=sys.stdout):
                 results.append(future.result())
     
-    # Console Output
-    for r in results:
-        print_analysis_result(r)
+    # Console Output (only if detailed mode is enabled)
+    if detailed:
+        for r in results:
+            print_analysis_result(r)
     print_summary(results)
 
     # Generate HTML Report
@@ -187,6 +190,7 @@ def main():
     analyze_parser.add_argument('target_paths', nargs='+', help='One or more files or directories to process.')
     analyze_parser.add_argument('-w', '--workers', type=int, default=None, help='Number of parallel workers.')
     analyze_parser.add_argument('-o', '--output', type=str, default='flac_analysis_report.html', help='Path to the output HTML report.')
+    analyze_parser.add_argument('-d', '--detailed', action='store_true', help='Enable detailed output (show analysis per file).')
     
     # Repair command
     repair_parser = subparsers.add_parser('repair', help='Repair files based on analysis. Use --force to re-encode all.')

@@ -1,6 +1,26 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
+## [Unreleased] - Next version
+
+### Added
+
+- `--detailed`/`-d` option to the analyze command to enable detailed per-file output in the console. By default, the console output no longer lists all files to avoid excessive output as before.
+
+### Changed
+
+-
+
+### Fixed
+
+-
+
+### Improved
+
+-
+
+### Technical
+
+-
 
 ## [0.3.0] - 2026-02-05
 
