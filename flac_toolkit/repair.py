@@ -27,7 +27,7 @@ def repair_filename(file_path: Path) -> Path:
             logging.error(f"✗ Rename error: {e}")
     return file_path
 
-def reencode_flac(input_path: Path) -> Path | None:
+def reencode_flac(input_path: Path, no_backup: bool = False) -> Path | None:
     # Use a temporary name for the repair process
     temp_output_path = input_path.with_stem(f"{input_path.stem}_repaired")
     success = False
@@ -57,7 +57,13 @@ def reencode_flac(input_path: Path) -> Path | None:
     # Post-processing: Metadata copy and Swap
     _copy_metadata(input_path, temp_output_path)
     
-    if _quarantine_original(input_path):
+    if no_backup:
+        # Delete original file directly (no backup)
+        try:
+            input_path.unlink()
+            logging.info(f"  ✓ Deleted original (no-backup mode): {input_path.name}")
+        except OSError as e:
+            logging.warning(f"  ⚠ Failed to delete original: {e}")
         try:
             temp_output_path.rename(input_path)
             logging.info(f"  ✓ Renamed repaired file to original name: {input_path.name}")
@@ -66,8 +72,18 @@ def reencode_flac(input_path: Path) -> Path | None:
             logging.error(f"  ✗ Failed to rename repaired file to original name: {e}")
             return temp_output_path
     else:
-        logging.warning("  ⚠ Quarantine failed, keeping repaired file with '_repaired' suffix.")
-        return temp_output_path
+        # Default behavior: quarantine original
+        if _quarantine_original(input_path):
+            try:
+                temp_output_path.rename(input_path)
+                logging.info(f"  ✓ Renamed repaired file to original name: {input_path.name}")
+                return input_path
+            except OSError as e:
+                logging.error(f"  ✗ Failed to rename repaired file to original name: {e}")
+                return temp_output_path
+        else:
+            logging.warning("  ⚠ Quarantine failed, keeping repaired file with '_repaired' suffix.")
+            return temp_output_path
 
 def _quarantine_original(file_path: Path) -> bool:
     """Moves the original file to a quarantine folder. Returns True if successful."""

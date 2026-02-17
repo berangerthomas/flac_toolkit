@@ -64,20 +64,20 @@ def analyze(args):
     generate_html_report(df, output_html)
 
 
-def repair_worker(file_path: Path, force: bool):
+def repair_worker(file_path: Path, force: bool, no_backup: bool):
     if force:
-        reencode_flac(file_path)
+        reencode_flac(file_path, no_backup=no_backup)
         return
 
     analysis = analyze_flac_comprehensive(file_path)
     if not analysis['repair_suggestions']:
-        logging.debug(f"OK: {file_path.name}")
+        logging.info(f"Skipping (valid): {file_path.name}")
         return
     
     logging.info(f"Issues found in: {file_path.name}")
     for suggestion in analysis['repair_suggestions']:
         if suggestion['action'] == 'reencode':
-            reencode_flac(file_path)
+            reencode_flac(file_path, no_backup=no_backup)
         elif suggestion['action'] == 'rename':
             repair_filename(file_path)
 
@@ -87,6 +87,7 @@ def repair(args):
     Repair files based on analysis. Use --force to re-encode all.
     """
     force = args.force
+    no_backup = args.no_backup
     workers = args.workers
     target_paths = [Path(p) for p in args.target_paths]
     
@@ -94,6 +95,9 @@ def repair(args):
         logging.info("REPAIR Mode (Forced) - Re-encoding all files\n" + "=" * 50)
     else:
         logging.info("REPAIR Mode (Auto) - Analyzing and repairing problematic files\n" + "=" * 50)
+    
+    if no_backup:
+        logging.info("No-backup mode enabled: original files will be deleted after successful repair.")
 
     files = list(find_flac_files(target_paths))
     if not files:
@@ -108,13 +112,13 @@ def repair(args):
     if workers is not None and workers == 1:
         tqdm.write("Running in sequential mode (1 worker).")
         for f in tqdm(files, unit="file", miniters=1, mininterval=0.0, file=sys.stdout):
-            repair_worker(f, force)
+            repair_worker(f, force, no_backup)
     else:
         import os
         effective_workers = workers if workers else os.cpu_count()
         tqdm.write(f"Running in parallel mode ({effective_workers} workers).")
         with ProcessPoolExecutor(max_workers=workers) as executor:
-            futures = [executor.submit(repair_worker, f, force) for f in files]
+            futures = [executor.submit(repair_worker, f, force, no_backup) for f in files]
             for future in tqdm(as_completed(futures), total=len(files), unit="file", miniters=1, mininterval=0.0, file=sys.stdout):
                 future.result()
 
@@ -196,6 +200,7 @@ def main():
     repair_parser = subparsers.add_parser('repair', help='Repair files based on analysis. Use --force to re-encode all.')
     repair_parser.add_argument('target_paths', nargs='+', help='One or more files or directories to process.')
     repair_parser.add_argument('--force', action='store_true', help='Force re-encoding on all files.')
+    repair_parser.add_argument('--no-backup', action='store_true', help='Delete original files instead of quarantining (saves disk space).')
     repair_parser.add_argument('-w', '--workers', type=int, default=None, help='Number of parallel workers.')
     
     # ReplayGain command

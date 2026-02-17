@@ -5,16 +5,17 @@
 ### Added
 
 - `--detailed`/`-d` option to the analyze command to enable detailed per-file output in the console. By default, the console output no longer lists all files to avoid excessive output as before.
+- `--no-backup` option to the repair command to delete original files instead of quarantining them. Useful for large libraries where disk space is a concern (avoids doubling storage requirements).
+
+### Improved
+
+- **Repair mode**: Better visibility for skipped files. Files that are valid and don't need repair now show `Skipping (valid): <filename>` instead of being silently ignored (was previously only visible in debug mode).
 
 ### Changed
 
 -
 
 ### Fixed
-
--
-
-### Improved
 
 -
 
