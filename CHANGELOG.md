@@ -21,7 +21,7 @@
 
 ### Technical
 
--
+- **Startup performance**: Migrated all heavy imports (`mutagen`, `tqdm`, `pandas`, `flac_toolkit.*`, `concurrent.futures`) to lazy imports inside each command function. `--help` and argument parsing now execute instantly without loading any processing dependencies.
 
 ## [0.3.0] - 2026-02-05
 

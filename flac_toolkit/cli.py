@@ -1,29 +1,25 @@
 import logging
 import argparse
 import sys
-from pathlib import Path
-from typing import List
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from collections import defaultdict
-from mutagen.flac import FLAC
 
-from flac_toolkit.core import find_flac_files, setup_logging
-from flac_toolkit.analyzer import analyze_flac_comprehensive
-from flac_toolkit.repair import repair_filename, reencode_flac
-from flac_toolkit.replaygain import process_album
-from flac_toolkit.reporter import print_analysis_result, print_summary
-from flac_toolkit.dataframe import create_dataframe, generate_html_report
-from flac_toolkit.dedupe import find_duplicates, print_duplicate_report, generate_dedupe_html_report
-from tqdm import tqdm
 
 def analyze(args):
     """
     Perform an in-depth analysis of each file and generate an HTML report.
     """
+    import os
+    from pathlib import Path
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    from tqdm import tqdm
+    from flac_toolkit.core import find_flac_files
+    from flac_toolkit.analyzer import analyze_flac_comprehensive
+    from flac_toolkit.reporter import print_analysis_result, print_summary
+    from flac_toolkit.dataframe import create_dataframe, generate_html_report
+
     detailed = getattr(args, 'detailed', False)
-    
+
     logging.info("ANALYZE Mode - In-depth analysis\n" + "=" * 50)
-    
+
     workers = args.workers
     output_html = args.output
     target_paths = [Path(p) for p in args.target_paths]
@@ -41,7 +37,6 @@ def analyze(args):
         results = [analyze_flac_comprehensive(f) for f in tqdm(files, unit="file", miniters=1, mininterval=0.0, file=sys.stdout)]
     else:
         # Parallel execution
-        import os
         effective_workers = workers if workers else os.cpu_count()
         tqdm.write(f"Running in parallel mode ({effective_workers} workers).")
         with ProcessPoolExecutor(max_workers=workers) as executor:
@@ -51,7 +46,7 @@ def analyze(args):
             # Process results as they complete (fixes progress bar jumps caused by slow files blocking the queue in map)
             for future in tqdm(as_completed(futures), total=len(files), unit="file", miniters=1, mininterval=0.0, file=sys.stdout):
                 results.append(future.result())
-    
+
     # Console Output (only if detailed mode is enabled)
     if detailed:
         for r in results:
@@ -64,7 +59,10 @@ def analyze(args):
     generate_html_report(df, output_html)
 
 
-def repair_worker(file_path: Path, force: bool, no_backup: bool):
+def repair_worker(file_path, force: bool, no_backup: bool):
+    from flac_toolkit.analyzer import analyze_flac_comprehensive
+    from flac_toolkit.repair import repair_filename, reencode_flac
+
     if force:
         reencode_flac(file_path, no_backup=no_backup)
         return
@@ -73,7 +71,7 @@ def repair_worker(file_path: Path, force: bool, no_backup: bool):
     if not analysis['repair_suggestions']:
         logging.info(f"Skipping (valid): {file_path.name}")
         return
-    
+
     logging.info(f"Issues found in: {file_path.name}")
     for suggestion in analysis['repair_suggestions']:
         if suggestion['action'] == 'reencode':
@@ -86,16 +84,22 @@ def repair(args):
     """
     Repair files based on analysis. Use --force to re-encode all.
     """
+    import os
+    from pathlib import Path
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    from tqdm import tqdm
+    from flac_toolkit.core import find_flac_files
+
     force = args.force
     no_backup = args.no_backup
     workers = args.workers
     target_paths = [Path(p) for p in args.target_paths]
-    
+
     if force:
         logging.info("REPAIR Mode (Forced) - Re-encoding all files\n" + "=" * 50)
     else:
         logging.info("REPAIR Mode (Auto) - Analyzing and repairing problematic files\n" + "=" * 50)
-    
+
     if no_backup:
         logging.info("No-backup mode enabled: original files will be deleted after successful repair.")
 
@@ -114,7 +118,6 @@ def repair(args):
         for f in tqdm(files, unit="file", miniters=1, mininterval=0.0, file=sys.stdout):
             repair_worker(f, force, no_backup)
     else:
-        import os
         effective_workers = workers if workers else os.cpu_count()
         tqdm.write(f"Running in parallel mode ({effective_workers} workers).")
         with ProcessPoolExecutor(max_workers=workers) as executor:
@@ -124,13 +127,20 @@ def repair(args):
 
     logging.info("\nRepair process completed.")
 
+
 def replaygain(args):
     """
     Calculate and apply ReplayGain tags.
     """
+    from pathlib import Path
+    from collections import defaultdict
+    from mutagen.flac import FLAC
+    from flac_toolkit.core import find_flac_files
+    from flac_toolkit.replaygain import process_album
+
     assume_album = args.assume_album
     target_paths = [Path(p) for p in args.target_paths]
-    
+
     logging.info("REPLAYGAIN Mode - Calculate and apply track/album ReplayGain\n" + "=" * 50)
 
     files = list(find_flac_files(target_paths))
@@ -152,73 +162,79 @@ def replaygain(args):
             except Exception as e:
                 logging.warning(f"Could not read metadata from {file_path.name}: {e}")
 
-    
     album_items = list(albums.items())
 
     for album_name, album_files in album_items:
         logging.info(f"\n--- Processing Album: {album_name} ({len(album_files)} tracks) ---")
         process_album(album_files)
 
+
 def dedupe(args):
     """
     Find duplicate FLAC files.
     """
+    from pathlib import Path
+    from flac_toolkit.dedupe import find_duplicates, print_duplicate_report, generate_dedupe_html_report
+
     logging.info("DEDUPE Mode - Scanning for duplicates\n" + "=" * 50)
     target_paths = [Path(p) for p in args.target_paths]
     output_html = args.output
     workers = args.workers
-    
+
     results = find_duplicates(target_paths, workers=workers)
     print_duplicate_report(results)
-    
+
     # Generate HTML Report
     if results:
         logging.info("\nGenerating HTML report...")
         generate_dedupe_html_report(results, Path(output_html))
 
+
 def main():
+    from flac_toolkit.core import setup_logging
+
     parser = argparse.ArgumentParser(
         prog='flac_toolkit',
         description='FLAC Toolkit - Advanced diagnosis, repair, and ReplayGain tool.'
     )
-    
+
     # Global options
     parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose (debug) output.')
     parser.add_argument('-q', '--quiet', action='store_true', help='Suppress all output except errors.')
-    
+
     # Subcommands
     subparsers = parser.add_subparsers(dest='command', required=True, help='Available commands')
-    
+
     # Analyze command
     analyze_parser = subparsers.add_parser('analyze', help='Perform an in-depth analysis of each file and generate an HTML report.')
     analyze_parser.add_argument('target_paths', nargs='+', help='One or more files or directories to process.')
     analyze_parser.add_argument('-w', '--workers', type=int, default=None, help='Number of parallel workers.')
     analyze_parser.add_argument('-o', '--output', type=str, default='flac_analysis_report.html', help='Path to the output HTML report.')
     analyze_parser.add_argument('-d', '--detailed', action='store_true', help='Enable detailed output (show analysis per file).')
-    
+
     # Repair command
     repair_parser = subparsers.add_parser('repair', help='Repair files based on analysis. Use --force to re-encode all.')
     repair_parser.add_argument('target_paths', nargs='+', help='One or more files or directories to process.')
     repair_parser.add_argument('--force', action='store_true', help='Force re-encoding on all files.')
     repair_parser.add_argument('--no-backup', action='store_true', help='Delete original files instead of quarantining (saves disk space).')
     repair_parser.add_argument('-w', '--workers', type=int, default=None, help='Number of parallel workers.')
-    
+
     # ReplayGain command
     replaygain_parser = subparsers.add_parser('replaygain', help='Calculate and apply ReplayGain tags.')
     replaygain_parser.add_argument('target_paths', nargs='+', help='One or more files or directories to process.')
     replaygain_parser.add_argument('--assume-album', action='store_true', help='Treat all files as one album.')
-    
+
     # Dedupe command
     dedupe_parser = subparsers.add_parser('dedupe', help='Find duplicate FLAC files (strict and audio-only).')
     dedupe_parser.add_argument('target_paths', nargs='+', help='One or more files or directories to process.')
     dedupe_parser.add_argument('-o', '--output', type=str, default='flac_duplicate_report.html', help='Path to the output HTML report.')
     dedupe_parser.add_argument('-w', '--workers', type=int, default=None, help='Number of parallel workers.')
-    
+
     args = parser.parse_args()
-    
+
     # Setup logging based on global flags
     setup_logging(args.verbose, args.quiet)
-    
+
     # Dispatch to the appropriate command
     if args.command == 'analyze':
         analyze(args)
