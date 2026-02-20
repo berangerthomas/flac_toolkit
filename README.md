@@ -15,9 +15,9 @@ A command-line tool for the analysis and repair of FLAC audio files. This tool c
 * **Universal Filename Validation:** Checks for invalid filenames using a strict, universal ruleset. The generated report includes detailed reasons for any validation failures.
 * **Automated Re-encoding (`repair` mode):**
   * **Identifies and re-encodes** files with structural errors to produce a valid version.
-  * Quarantines original files in a `_flac_toolkit_quarantine` folder.
+  * Quarantines original files in a `_flac_toolkit_quarantine` folder (or deletes originals with `--no-backup`).
   * Preserves original filenames for repaired files.
-  * Falls back to `ffmpeg` if `flac` is not available.
+  * Uses the native `flac` encoder (significantly faster than ffmpeg), with fallback to `ffmpeg` if unavailable.
 * **ReplayGain Calculation:** Applies track and album ReplayGain tags based on the EBU R 128 standard (-18 LUFS).
 * **Duplicate Detection (`dedupe` mode):**
   * Scans audio MD5 signatures to find files with identical audio content.
@@ -55,10 +55,10 @@ python main.py [mode] [options] [TARGET_PATHS]...
 ### Modes
 
 * `analyze`: Performs a detailed analysis of target files.
-  * Generates an interactive **HTML Report** (`flac_analysis_report.html`) by default.
-  * Displays a summary in the console.
+  * Generates an interactive **HTML Report** named after the analyzed directory (e.g., `flac_analysis_report_musique.html` for a `musique/` directory). This prevents reports from overwriting each other.
+  * Displays a summary in the console (use `--detailed` for per-file output).
 * `repair`: Analyzes files and **re-encodes** any that are structurally invalid.
-  * **Quarantine:** Original files are moved to a `_flac_toolkit_quarantine` subfolder.
+  * **Quarantine:** Original files are moved to a `_flac_toolkit_quarantine` subfolder (or deleted with `--no-backup`).
   * **Seamless Replacement:** The repaired file replaces the original with the same name.
   * Use `--force` to re-encode all target files, regardless of their status.
 * `replaygain`: Calculates and applies ReplayGain tags (both track and album) to the target files.
@@ -70,7 +70,9 @@ python main.py [mode] [options] [TARGET_PATHS]...
 ### Options
 
 * `--output`, `-o`: Used with `analyze` and `dedupe` modes. Specify the output path for the HTML report.
+* `--detailed`, `-d`: Used with `analyze` mode. Enables detailed per-file output in the console.
 * `--force`: Used with `repair` mode. Forces re-encoding of all files, even if they are valid.
+* `--no-backup`: Used with `repair` mode. Deletes original files instead of quarantining them (saves disk space).
 * `--assume-album`: Used with `replaygain` mode. Treats all processed files as a single album for ReplayGain calculation.
 * `-w`, `--workers`: Number of parallel workers for faster processing (available in `analyze`, `repair`, and `dedupe` modes).
 * `-v`, `--verbose`: Enables detailed debug output.

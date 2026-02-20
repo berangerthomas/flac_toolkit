@@ -4,12 +4,11 @@
 
 ### Added
 
-- `--detailed`/`-d` option to the analyze command to enable detailed per-file output in the console. By default, the console output no longer lists all files to avoid excessive output as before.
-- `--no-backup` option to the repair command to delete original files instead of quarantining them. Useful for large libraries where disk space is a concern (avoids doubling storage requirements).
+-
 
 ### Improved
 
-- **Repair mode**: Better visibility for skipped files. Files that are valid and don't need repair now show `Skipping (valid): <filename>` instead of being silently ignored (was previously only visible in debug mode).
+-
 
 ### Changed
 
@@ -18,6 +17,29 @@
 ### Fixed
 
 -
+
+### Technical
+
+-
+
+## [0.4.0] - 2026-02-20
+
+### Added
+
+- `--detailed`/`-d` option to the analyze command to enable detailed per-file output in the console. By default, the console output no longer lists all files to avoid excessive output as before.
+- `--no-backup` option to the repair command to delete original files instead of quarantining them. Useful for large libraries where disk space is a concern (avoids doubling storage requirements).
+
+### Changed
+
+- **Analyze command**: Default HTML report filename is now based on the analyzed directory name (e.g., `flac_analysis_report_musique.html` instead of always `flac_analysis_report.html`). This prevents reports from overwriting each other when analyzing different directories.
+
+### Improved
+
+- **Repair mode**: Better visibility for skipped files. Files that are valid and don't need repair now show `Skipping (valid): <filename>` instead of being silently ignored (was previously only visible in debug mode).
+
+### Fixed
+
+- Re-encoding now uses short temporary filenames to avoid Windows MAX_PATH (260 chars) limit with long filenames
 
 ### Technical
 

@@ -23,6 +23,18 @@ def analyze(args):
     workers = args.workers
     output_html = args.output
     target_paths = [Path(p) for p in args.target_paths]
+    
+    # Generate default output name based on first target path if not specified
+    if output_html == 'flac_analysis_report.html':  # Default value, not user-specified
+        first_target = target_paths[0]
+        # Use the directory name (or file stem if it's a file)
+        if first_target.is_file():
+            target_name = first_target.stem
+        else:
+            target_name = first_target.name if first_target.name else first_target.parent.name
+        # Sanitize the name: replace special chars with underscores
+        safe_name = ''.join(c if c.isalnum() or c in '-_' else '_' for c in str(target_name))
+        output_html = f'flac_analysis_report_{safe_name}.html'
 
     files = list(find_flac_files(target_paths))
     if not files:
@@ -56,7 +68,7 @@ def analyze(args):
     # Generate HTML Report
     logging.info("\nGenerating HTML report...")
     df = create_dataframe(results)
-    generate_html_report(df, output_html)
+    generate_html_report(df, Path(output_html))
 
 
 def repair_worker(file_path, force: bool, no_backup: bool):
@@ -102,6 +114,15 @@ def repair(args):
 
     if no_backup:
         logging.info("No-backup mode enabled: original files will be deleted after successful repair.")
+
+    # Detect and display which encoder will be used
+    import shutil
+    if shutil.which('flac'):
+        tqdm.write("Encoder: flac (compression level 8 --best)")
+    elif shutil.which('ffmpeg'):
+        tqdm.write("Encoder: ffmpeg (compression level 12)")
+    else:
+        tqdm.write("Warning: No encoder found (flac or ffmpeg required)")
 
     files = list(find_flac_files(target_paths))
     if not files:
