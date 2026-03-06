@@ -8,8 +8,9 @@ A command-line tool for the analysis and repair of FLAC audio files. This tool c
 
 ## Key Features
 
-* **Comprehensive Analysis:** Uses both `mutagen` library and manual header parsing to detect FLAC file issues.
+* **Comprehensive Validation:** Uses RFC 9639 binary parsing including STREAMINFO, metadata blocks, first-frame CRC-8 verification, and audio MD5 checksum to rigorously validate FLAC files.
 * **Interactive HTML Reporting:** Generates an HTML report with sorting, filtering, and copy-to-clipboard functionality.
+* **Machine-Readable JSON Export:** Every `validate` run also produces a `.json` data file containing all results. This file can be used to regenerate the HTML report without re-scanning (via `report` command), or consumed by external tools and scripts.
 * **Structural Analysis:** Detects common corruption indicators like oversized PADDING blocks.
 * **Data Structure Check:** Identifies data inconsistencies that may indicate file corruption.
 * **Universal Filename Validation:** Checks for invalid filenames using a strict, universal ruleset. The generated report includes detailed reasons for any validation failures.
@@ -19,16 +20,17 @@ A command-line tool for the analysis and repair of FLAC audio files. This tool c
   * Preserves original filenames for repaired files.
   * Uses the native `flac` encoder (significantly faster than ffmpeg), with fallback to `ffmpeg` if unavailable.
 * **ReplayGain Calculation:** Applies track and album ReplayGain tags based on the EBU R 128 standard (-18 LUFS).
-* **Duplicate Detection (`dedupe` mode):**
+* **Duplicate Detection (`--check-duplicates` in `validate`):**
   * Scans audio MD5 signatures to find files with identical audio content.
   * Distinguishes **strict duplicates** (byte-for-byte identical) from **audio-only duplicates** (same audio, different metadata).
+  * Reuses the MD5 signatures already computed during validation — no extra I/O — and adds a **Duplicates** tab directly in the validation report.
   * Helps clean up libraries with multiple copies of the same tracks.
 * **Status Classification:** Classifies files as `VALID`, `VALID (with warnings)`, or `INVALID`.
 
 ## Prerequisites
 
 * Python 3.12+
-* Required Python packages: `mutagen`, `unidecode`, `pyloudnorm`, `soundfile`, `numpy`, `pandas`, `tqdm`, `pathvalidate`.
+* Required Python packages: `mutagen`, `unidecode`, `pyloudnorm`, `soundfile`, `numpy`, `pandas`, `rich`, `pathvalidate`.
 * **For Repair Only:** `flac` command-line tool and/or `ffmpeg` installed and available in your system's PATH. (Analysis is now fully standalone).
 
 ## Installation
@@ -54,42 +56,41 @@ python main.py [mode] [options] [TARGET_PATHS]...
 
 ### Modes
 
-* `analyze`: Performs a detailed analysis of target files.
-  * Generates an interactive **HTML Report** named after the analyzed directory (e.g., `flac_analysis_report_musique.html` for a `musique/` directory). This prevents reports from overwriting each other.
-  * Displays a summary in the console (use `--detailed` for per-file output).
+* `validate`: Validates target files against RFC 9639 and generates an HTML report.
+  * Generates an interactive **HTML Report** (default: `flac_validation_report_<target>.html`).
+  * Displays a summary in the console.
+  * Use `--check-duplicates` to also detect audio duplicates and include a **Duplicates** tab in the same report (no extra I/O — MD5s are reused from validation).
 * `repair`: Analyzes files and **re-encodes** any that are structurally invalid.
   * **Quarantine:** Original files are moved to a `_flac_toolkit_quarantine` subfolder (or deleted with `--no-backup`).
   * **Seamless Replacement:** The repaired file replaces the original with the same name.
   * Use `--force` to re-encode all target files, regardless of their status.
+* `report`: Regenerates an HTML report from a previously saved `.json` data file (no re-scan required). Useful to refresh the report after a template update, or to share/archive results separately from the HTML.
+
 * `replaygain`: Calculates and applies ReplayGain tags (both track and album) to the target files.
-* `dedupe`: Scans for duplicate files based on audio content.
-  * Generates an interactive **HTML Report** (`flac_duplicate_report.html`) by default.
-  * **Audio-Only Duplicates:** Files with identical audio but different metadata or filenames.
-  * **Strict Duplicates:** Files that are byte-for-byte identical.
 
 ### Options
 
-* `--output`, `-o`: Used with `analyze` and `dedupe` modes. Specify the output path for the HTML report.
-* `--detailed`, `-d`: Used with `analyze` mode. Enables detailed per-file output in the console.
+* `--output`, `-o`: Used with `validate` and `report` modes. Specify the output path for the HTML report.
+* `--check-duplicates`: Used with `validate` mode. Detects audio duplicates by grouping files that share the same audio MD5 (already computed during validation — zero extra I/O). Adds a **Duplicates** tab to the validation HTML report showing audio-only and strict duplicate groups.
 * `--force`: Used with `repair` mode. Forces re-encoding of all files, even if they are valid.
 * `--no-backup`: Used with `repair` mode. Deletes original files instead of quarantining them (saves disk space).
 * `--assume-album`: Used with `replaygain` mode. Treats all processed files as a single album for ReplayGain calculation.
-* `-w`, `--workers`: Number of parallel workers for faster processing (available in `analyze`, `repair`, and `dedupe` modes).
+* `-w`, `--workers`: Number of parallel workers for faster processing (available in `validate` and `repair` modes).
 * `-v`, `--verbose`: Enables detailed debug output.
 * `-q`, `--quiet`: Suppresses all informational output, showing only errors.
 
 ### Examples
 
-* **Analyze a single file:**
+* **Validate a single file:**
 
   ```bash
-  python main.py analyze path/to/my_song.flac
+  python main.py validate path/to/my_song.flac
   ```
 
-* **Analyze all FLAC files in a directory (recursive):**
+* **Validate all FLAC files in a directory (recursive):**
 
   ```bash
-  python main.py analyze path/to/my_music/
+  python main.py validate path/to/my_music/
   ```
 
 * **Automatically repair all problematic files in a directory:**
@@ -110,7 +111,25 @@ python main.py [mode] [options] [TARGET_PATHS]...
   python main.py replaygain path/to/an_album/
   ```
 
-* **Find duplicate files in your library:**
+* **Validate and check for duplicates in one pass:**
+
+  ```bash
+  python main.py validate --check-duplicates path/to/my_library/
+  ```
+
+* **Regenerate an HTML report from saved JSON data (no re-scan):**
+
+  ```bash
+  python main.py report flac_validation_report_my_library.json
+  ```
+
+* **Regenerate with a custom output name:**
+
+  ```bash
+  python main.py report data.json -o my_report.html
+  ```
+
+* **Find duplicate files in your library (standalone):**
 
   ```bash
   python main.py dedupe path/to/my_library/
@@ -118,17 +137,17 @@ python main.py [mode] [options] [TARGET_PATHS]...
 
 ![Duplicates HTML report](docs/audio_duplicates_html_report.jpg)
 
-## Understanding the `analyze` Output
+## Understanding the `validate` Output
 
-The analysis report for each file includes the following sections:
+The HTML report for each file includes the following sections:
 
 ![Example Analysis Output](docs/example_1.jpg)
 
-Example screenshot showing the detailed analysis output for a FLAC file.
-
-* **Status:** Overall file validity assessment.
+* **Status:** Overall file validity assessment (`VALID`, `VALID (with warnings)`, or `INVALID`).
 * **Audio Information:** Basic metadata like duration, sample rate, and channels.
 * **Metadata Block Structure:** Technical view of the file's internal metadata structure.
-* **Data Structure Analysis:** Information about audio data location and size.
-* **Detected Errors / Warnings:** List of identified problems.
-* **Repair Suggestions:** Recommended actions to fix detected issues.
+* **MD5 Verification:** Header MD5 compared against the calculated MD5 of the audio data.
+* **Validation Results:** Errors, warnings, and informational notes with RFC 9639 references.
+* **Tags:** Vorbis comment tags including ReplayGain values when present.
+
+When `--check-duplicates` is used, the report gains a second **Duplicates** tab listing all files that share the same audio content, grouped by audio MD5 and classified as **Audio-Only** or **Strict** (byte-for-byte identical) duplicates.

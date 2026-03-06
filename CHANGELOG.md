@@ -1,26 +1,41 @@
 # Changelog
 
-## [Unreleased] - Next version
+## [1.0.0] - 2026-03-05
 
 ### Added
 
--
+- **Machine-readable JSON data export**: Every `validate` run now also produces a `.json` file alongside the HTML report. This file contains all per-file analysis results and duplicate group data, and can be consumed by external tools or used to regenerate the HTML report without re-scanning.
+- **`report` command**: New CLI command that regenerates an HTML report from a previously saved `.json` data file. Usage: `python main.py report data.json [-o output.html]`. No re-scan required — useful for refreshing reports after template updates or sharing results.
+- **RFC 9639 Compliance Tests**: New test suite (`tests/test_validator_rfc9639.py`) for validating RFC 9639 compliance
+- **`--check-duplicates` option for `validate` mode**: Detects audio duplicates in the same pass as validation. Because audio MD5 checksums are already computed during RFC 9639 validation, duplicate detection requires **zero additional I/O**. Strict duplicates (byte-for-byte identical files) are identified with a secondary SHA-256 pass applied only to the candidate groups. Results are exposed in a new **Duplicates tab** in the validation HTML report.
+- **Duplicates tab in the validation HTML report**: When `--check-duplicates` is used, the report gains a second tab showing all duplicate groups (audio-only and strict), with sorting, filtering, copy-to-clipboard, and folder-open buttons. The tab is populated lazily on first view for zero-cost startup.
+- **HTML Report popup**: Three copy formats - Text, JSON, and Markdown for structured export
 
 ### Improved
 
--
+- **HTML Report popup**: Complete redesign with compact layout
+  - Removed duplicate information (Sample Rate, Channels, Bits Per Sample now shown once)
+  - Added new fields: Audio Quality label (CD Quality, Hi-Res 96kHz, Hi-Res 192kHz), Block Size Strategy (Fixed/Variable), Audio Offset, Audio Size
+  - MD5 verification section now shows match status with color coding (green=match, red=mismatch)
+  - Tags section redesigned with inline compact display
+  - Metadata blocks table simplified (Type, Size, Offset)
+  - Modal width reduced from 900px to 750px for better screen fit
+  - All sections use 4-column grid layout for compactness
 
 ### Changed
 
--
+- **PI-10 Removed**: The 16 MiB size limit check for PICTURE blocks has been removed (RFC §8.8 does not define any size limit)
+- **tqdm removed**: replaced by rich.
 
-### Fixed
+### Removed
 
--
+- **`dedupe` command**: Removed. Duplicate detection is now exclusively available via `validate --check-duplicates`, which reuses the audio MD5 already computed during RFC 9639 validation (zero extra I/O). The `--check-duplicates` path also uses the *calculated* MD5 (more reliable than the header-stored value used by the former `dedupe` command), and integrates results directly into the validation HTML report.
+- **`--detailed`/`-d` option**: Removed from `validate` command. The HTML report popup is now more comprehensive than the console output ever was, making this option redundant. Users get full details by clicking the "Report" button in the HTML report.
 
 ### Technical
 
--
+- **First-frame-only validation**: `_validate_frames()` rewritten to parse only the first audio frame header instead of traversing every frame. CRC-8 is still verified on the first frame; full audio integrity is guaranteed by the MD5 checksum in STREAMINFO.
+- **Removed `analyze` command**: Deprecated CLI alias removed. Only `validate` is supported.
 
 ## [0.4.0] - 2026-02-20
 

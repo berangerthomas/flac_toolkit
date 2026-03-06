@@ -1,8 +1,17 @@
+"""
+flac_toolkit/dataframe.py
+DataFrame creation and HTML report generation with RFC 9639 validation details.
+"""
+
 import logging
 import json
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import pandas as pd
+
+from flac_toolkit._version import __version__
+
 
 def create_dataframe(results: List[Dict[str, Any]]) -> pd.DataFrame:
     """
@@ -12,9 +21,9 @@ def create_dataframe(results: List[Dict[str, Any]]) -> pd.DataFrame:
     data = []
     for res in results:
         path_obj = Path(res['file'])
-        
+
         status_order_map = {'INVALID': 0, 'VALID (with warnings)': 1, 'VALID': 2}
-        
+
         row = {
             'file': path_obj.name,
             'file_path': str(path_obj),
@@ -24,8 +33,9 @@ def create_dataframe(results: List[Dict[str, Any]]) -> pd.DataFrame:
             'status_order': status_order_map.get(res['status'], 99),
             'errors': '\n'.join(res['errors']),
             'warnings': '\n'.join(res['warnings']),
+            'rfc9639_json': json.dumps(res.get('rfc9639', {}), ensure_ascii=False),
         }
-        
+
         # Add metrics
         if 'metrics' in res:
             metrics = res['metrics'].copy()
@@ -35,235 +45,296 @@ def create_dataframe(results: List[Dict[str, Any]]) -> pd.DataFrame:
                 metrics['duration'] = f"{int(d_sec // 60):02d}:{int(d_sec % 60):02d}"
                 del metrics['duration_seconds']
             row.update(metrics)
-            
+
         # Add tags
         if 'tags' in res:
             row.update(res['tags'])
-            
+
         data.append(row)
-        
+
     df = pd.DataFrame(data)
     return df
 
-def generate_html_report(df: pd.DataFrame, output_path: Path):
-    """
-    Generates a high-performance HTML report using Tabulator.js with virtual DOM.
-    Handles 100,000+ rows efficiently by only rendering visible rows.
-    """
-    if df.empty:
-        logging.warning("DataFrame is empty, cannot generate HTML report.")
-        return
 
-    # Convert DataFrame to JSON for Tabulator
-    # Replace NaN with empty strings for JSON serialization
-    df_clean = df.fillna('')
-    data_json = df_clean.to_json(orient='records', force_ascii=False)
-    
-    # Calculate summary stats
-    total_files = len(df)
-    total_size_gb = df['filesize_mb'].sum() / 1024 if 'filesize_mb' in df.columns else 0
-    invalid_count = len(df[df['status'] == 'INVALID'])
-    warning_count = len(df[df['status'] == 'VALID (with warnings)'])
-    valid_count = len(df[df['status'] == 'VALID'])
+def _safe_json_for_html(json_str: str) -> str:
+    """Escape sequences that would prematurely close a <script> tag."""
+    return json_str.replace('</', r'<\/')
 
-    html_content = f"""<!DOCTYPE html>
-<html>
+
+def save_report_data(
+    results: List[Dict[str, Any]],
+    output_path: Path,
+    duplicate_groups=None,
+) -> None:
+    """
+    Save all validation results and duplicate data to a JSON file.
+
+    This file contains everything needed to regenerate the HTML report
+    without re-scanning, and is also a machine-readable export for
+    downstream tooling.
+
+    Structure::
+
+        {
+            "version": "1.0.0",
+            "generated_at": "2026-03-05T14:30:00Z",
+            "results": [ ... ],          # raw per-file analysis dicts
+            "duplicates": [ ... ] | null  # serialised duplicate groups
+        }
+    """
+    # Serialise duplicate groups (they contain Path objects)
+    dupes_serialised: Optional[list] = None
+    if duplicate_groups is not None:
+        dupes_serialised = []
+        for grp in duplicate_groups:
+            dupes_serialised.append({
+                "audio_md5": grp.audio_md5,
+                "files": [str(f) for f in grp.files],
+                "strict_groups": [[str(f) for f in sg] for sg in grp.strict_groups],
+            })
+
+    payload = {
+        "version": __version__,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "results": results,
+        "duplicates": dupes_serialised,
+    }
+
+    try:
+        with open(output_path, 'w', encoding='utf-8') as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2, default=str)
+        logging.info(f"Report data saved: {output_path}")
+    except Exception as exc:
+        logging.error(f"Failed to write report data: {exc}")
+
+
+def load_report_data(json_path: Path):
+    """
+    Load a previously saved report-data JSON file.
+
+    Returns ``(results, duplicate_groups)`` where *duplicate_groups* is
+    a list of lightweight ``SimpleNamespace`` objects (same duck-type API
+    as the real ``DuplicateGroup`` but without needing the dedupe module)
+    or ``None``.
+    """
+    from types import SimpleNamespace
+
+    with open(json_path, 'r', encoding='utf-8') as fh:
+        payload = json.load(fh)
+
+    results = payload["results"]
+
+    duplicate_groups = None
+    dupes_raw = payload.get("duplicates")
+    if dupes_raw is not None:
+        duplicate_groups = []
+        for entry in dupes_raw:
+            grp = SimpleNamespace(
+                audio_md5=entry["audio_md5"],
+                files=[Path(f) for f in entry["files"]],
+                strict_groups=[[Path(f) for f in sg] for sg in entry["strict_groups"]],
+            )
+            duplicate_groups.append(grp)
+
+    logging.info(
+        f"Loaded report data: {len(results)} results"
+        + (f", {len(duplicate_groups)} duplicate groups" if duplicate_groups else "")
+        + f" (generated by v{payload.get('version', '?')} at {payload.get('generated_at', '?')})"
+    )
+    return results, duplicate_groups
+
+
+# ---------------------------------------------------------------------------
+# HTML report template.
+#
+# Architecture: plain Python string with %%MARKER%% placeholders so that
+# JavaScript code keeps normal { } braces.  No f-string doubling needed.
+# ---------------------------------------------------------------------------
+
+_HTML_TEMPLATE = r"""<!DOCTYPE html>
+<html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <title>FLAC Analysis Report</title>
-    <link href="https://unpkg.com/tabulator-tables@5.5.2/dist/css/tabulator_simple.min.css" rel="stylesheet">
-    <script type="text/javascript" src="https://unpkg.com/tabulator-tables@5.5.2/dist/js/tabulator.min.js"></script>
-    <style>
-        * {{ box-sizing: border-box; }}
-        html, body {{ 
-            height: 100%; 
-            margin: 0; 
-            padding: 0;
-            overflow: hidden;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; 
-            font-size: 13px; 
-            background-color: #fff; 
-            color: #333;
-        }}
-        
-        body {{ 
-            display: flex; 
-            flex-direction: column; 
-            padding: 20px; 
-        }}
-        
-        h1 {{ 
-            flex: 0 0 auto;
-            font-size: 18px; 
-            margin: 0 0 15px 0; 
-            color: #2c3e50; 
-            font-weight: 600;
-        }}
-        
-        /* Summary Bar */
-        .summary {{ 
-            flex: 0 0 auto;
-            display: flex; 
-            gap: 25px; 
-            padding: 12px 20px; 
-            background: #f8f9fa; 
-            border: 1px solid #e9ecef;
-            border-radius: 6px; 
-            margin-bottom: 15px;
-            font-size: 13px;
-            align-items: center;
-        }}
-        .summary-item {{ color: #666; }}
-        .summary-item strong {{ color: #333; font-weight: 600; }}
-        .stat-valid {{ color: #0ca678; }}
-        .stat-warning {{ color: #f59f00; }}
-        .stat-invalid {{ color: #fa5252; }}
-        
-        /* Search bar */
-        .controls {{
-            flex: 0 0 auto;
-            display: flex;
-            gap: 10px;
-            margin-bottom: 15px;
-            align-items: center;
-        }}
-        .search-box {{
-            padding: 8px 12px;
-            border: 1px solid #dee2e6;
-            border-radius: 4px;
-            background: #fff;
-            color: #333;
-            font-size: 13px;
-            width: 300px;
-        }}
-        .search-box::placeholder {{ color: #999; }}
-        .search-box:focus {{ outline: none; border-color: #228be6; }}
-        
-        .filter-btn {{
-            padding: 8px 14px;
-            border: 1px solid #dee2e6;
-            border-radius: 4px;
-            background: #fff;
-            color: #666;
-            cursor: pointer;
-            font-size: 12px;
-            transition: all 0.15s;
-        }}
-        .filter-btn:hover {{ background: #f8f9fa; color: #333; border-color: #adb5bd; }}
-        .filter-btn.active {{ background: #228be6; color: #fff; border-color: #228be6; }}
-        
-        /* Table container */
-        #table-container {{
-            flex: 1 1 auto;
-            min-height: 0;
-        }}
-        
-        /* Tabulator overrides for light theme */
-        .tabulator {{
-            background-color: #fff;
-            border: 1px solid #dee2e6;
-            border-radius: 6px;
-            font-size: 13px;
-        }}
-        .tabulator-header {{
-            background-color: #f8f9fa;
-            border-bottom: 2px solid #dee2e6;
-        }}
-        .tabulator-header .tabulator-col {{
-            background-color: #f8f9fa;
-            border-right: 1px solid #e9ecef;
-        }}
-        .tabulator-header .tabulator-col-content {{
-            padding: 10px 12px;
-        }}
-        .tabulator-header .tabulator-col-title {{
-            font-weight: 600;
-            color: #495057;
-            font-size: 12px;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }}
-        .tabulator-tableholder {{
-            background: #fff;
-        }}
-        .tabulator-row {{
-            border-bottom: 1px solid #f1f3f5;
-        }}
-        .tabulator-row:hover {{
-            background-color: #f8f9fa !important;
-        }}
-        .tabulator-row.tabulator-row-even {{
-            background-color: #fff;
-        }}
-        .tabulator-row.tabulator-row-odd {{
-            background-color: #fcfcfc;
-        }}
-        .tabulator-cell {{
-            padding: 8px 12px;
-            border-right: none;
-        }}
-        
-        /* Status badges - original style */
-        .status-badge {{
-            display: inline-block;
-            padding: 3px 8px;
-            border-radius: 12px;
-            font-size: 11px;
-            font-weight: 600;
-            text-transform: uppercase;
-            white-space: nowrap;
-        }}
-        .status-valid {{ background-color: #e6fcf5; color: #0ca678; border: 1px solid #c3fae8; }}
-        .status-invalid {{ background-color: #fff5f5; color: #fa5252; border: 1px solid #ffc9c9; }}
-        .status-warning {{ background-color: #fff9db; color: #f59f00; border: 1px solid #ffec99; }}
-        
-        /* Copy button */
-        .copy-btn {{
-            background: none;
-            border: 1px solid #dee2e6;
-            border-radius: 4px;
-            cursor: pointer;
-            padding: 2px 6px;
-            font-size: 12px;
-            color: #666;
-            margin-right: 6px;
-            transition: all 0.15s;
-        }}
-        .copy-btn:hover {{ background: #f1f3f5; color: #333; }}
-        
-        /* Cell styles */
-        .cell-errors {{ color: #e03131; white-space: pre-wrap; font-size: 12px; }}
-        .cell-warnings {{ color: #e67700; white-space: pre-wrap; font-size: 12px; }}
-        .cell-file {{ display: flex; align-items: center; }}
-        
-        /* Toast notification */
-        .toast {{
-            position: fixed;
-            bottom: 30px;
-            right: 30px;
-            background: #333;
-            color: #fff;
-            padding: 12px 24px;
-            border-radius: 6px;
-            opacity: 0;
-            transition: opacity 0.3s;
-            z-index: 1000;
-            font-size: 13px;
-        }}
-        .toast.show {{ opacity: 1; }}
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FLAC Validation Report &#8211; RFC 9639</title>
+<link rel="stylesheet" href="https://unpkg.com/tabulator-tables@5.5.2/dist/css/tabulator_simple.min.css">
+<script src="https://unpkg.com/tabulator-tables@5.5.2/dist/js/tabulator.min.js"></script>
+<style>
+/* === Reset & Base === */
+*{box-sizing:border-box}
+html,body{
+    height:100%;margin:0;padding:0;overflow:hidden;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    font-size:13px;background:#fff;color:#333;
+}
+body{display:flex;flex-direction:column;padding:20px}
+
+/* === Title === */
+h1{flex:0 0 auto;font-size:18px;margin:0 0 15px 0;color:#2c3e50;font-weight:600}
+
+/* === Summary Bar === */
+.summary{
+    flex:0 0 auto;display:flex;gap:25px;padding:12px 20px;
+    background:#f8f9fa;border:1px solid #e9ecef;border-radius:6px;
+    margin-bottom:15px;font-size:13px;align-items:center;
+}
+.summary-item{color:#666}
+.summary-item strong{color:#333;font-weight:600}
+.stat-valid{color:#0ca678}
+.stat-warning{color:#f59f00}
+.stat-invalid{color:#fa5252}
+
+/* === Controls === */
+.controls{flex:0 0 auto;display:flex;gap:10px;margin-bottom:15px;align-items:center}
+.search-box{
+    padding:8px 12px;border:1px solid #dee2e6;border-radius:4px;
+    background:#fff;color:#333;font-size:13px;width:300px;
+}
+.search-box::placeholder{color:#999}
+.search-box:focus{outline:none;border-color:#228be6}
+.filter-btn{
+    padding:8px 14px;border:1px solid #dee2e6;border-radius:4px;
+    background:#fff;color:#666;cursor:pointer;font-size:12px;transition:all .15s;
+}
+.filter-btn:hover{background:#f8f9fa;color:#333;border-color:#adb5bd}
+.filter-btn.active{background:#228be6;color:#fff;border-color:#228be6}
+
+/* === Tabulator Overrides === */
+#table-container{flex:1 1 auto;min-height:0}
+.tabulator{background:#fff;border:1px solid #dee2e6;border-radius:6px;font-size:13px}
+.tabulator-header{background:#f8f9fa;border-bottom:2px solid #dee2e6}
+.tabulator-header .tabulator-col{background:#f8f9fa;border-right:1px solid #e9ecef}
+.tabulator-header .tabulator-col-content{padding:10px 12px}
+.tabulator-header .tabulator-col-title{font-weight:600;color:#495057;font-size:12px;text-transform:uppercase;letter-spacing:.5px}
+.tabulator-tableholder{background:#fff}
+.tabulator-row{border-bottom:1px solid #f1f3f5}
+.tabulator-row:hover{background:#f8f9fa !important}
+.tabulator-row.tabulator-row-even{background:#fff}
+.tabulator-row.tabulator-row-odd{background:#fcfcfc}
+.tabulator-cell{padding:8px 12px;border-right:none}
+
+/* === Badges === */
+.status-badge{display:inline-block;padding:3px 8px;border-radius:12px;font-size:11px;font-weight:600;text-transform:uppercase;white-space:nowrap}
+.status-valid{background:#e6fcf5;color:#0ca678;border:1px solid #c3fae8}
+.status-invalid{background:#fff5f5;color:#fa5252;border:1px solid #ffc9c9}
+.status-warning{background:#fff9db;color:#f59f00;border:1px solid #ffec99}
+.quality-badge{display:inline-block;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:600;margin-left:6px}
+.quality-hires{background:#e7f5ff;color:#1971c2}
+.quality-cd{background:#f8f9fa;color:#666}
+.quality-low{background:#fff4e6;color:#e8590c}
+
+/* === Buttons === */
+.copy-btn{
+    background:none;border:1px solid #dee2e6;border-radius:4px;cursor:pointer;
+    padding:2px 6px;font-size:12px;color:#666;margin-right:6px;transition:all .15s;
+}
+.copy-btn:hover{background:#f1f3f5;color:#333}
+.report-btn{
+    background:#228be6;border:none;border-radius:4px;cursor:pointer;
+    padding:3px 8px;font-size:11px;color:#fff;font-weight:500;transition:all .15s;
+}
+.report-btn:hover{background:#1c7ed6}
+
+/* === Cell Styles === */
+.cell-errors{color:#e03131;white-space:pre-wrap;font-size:12px}
+.cell-warnings{color:#e67700;white-space:pre-wrap;font-size:12px}
+.cell-file{display:flex;align-items:center}
+
+/* === Modal === */
+.modal-overlay{
+    display:none;position:fixed;top:0;left:0;width:100%;height:100%;
+    background:rgba(0,0,0,.5);z-index:1000;align-items:center;justify-content:center;
+}
+.modal-overlay.active{display:flex}
+.modal{
+    background:#fff;border-radius:8px;width:92%;max-width:750px;max-height:88vh;
+    display:flex;flex-direction:column;box-shadow:0 10px 40px rgba(0,0,0,.2);
+}
+.modal-header{padding:12px 16px;border-bottom:1px solid #e9ecef;display:flex;justify-content:space-between;align-items:center}
+.modal-header h2{margin:0;font-size:14px;color:#2c3e50;font-weight:600}
+.modal-close{background:none;border:none;font-size:20px;cursor:pointer;color:#666;padding:0;line-height:1}
+.modal-close:hover{color:#333}
+.modal-body{padding:14px 16px;overflow-y:auto;flex:1}
+.modal-footer{padding:10px 16px;border-top:1px solid #e9ecef;display:flex;gap:8px;justify-content:flex-end}
+.modal-btn{padding:6px 14px;border-radius:4px;font-size:12px;cursor:pointer;transition:all .15s}
+.modal-btn-primary{background:#228be6;color:#fff;border:none}
+.modal-btn-primary:hover{background:#1c7ed6}
+.modal-btn-secondary{background:#fff;color:#666;border:1px solid #dee2e6}
+.modal-btn-secondary:hover{background:#f8f9fa}
+
+/* === Report Content === */
+.report-section{margin-bottom:14px}
+.report-section h3{font-size:12px;color:#495057;margin:0 0 8px 0;padding-bottom:4px;border-bottom:1px solid #e9ecef;font-weight:600;text-transform:uppercase;letter-spacing:.5px}
+.report-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
+.report-grid-2col{grid-template-columns:repeat(2,1fr)}
+.report-grid-3col{grid-template-columns:repeat(3,1fr)}
+.report-item{padding:6px 8px;background:#f8f9fa;border-radius:3px;font-size:11px}
+.report-item-label{color:#868e96;font-size:9px;text-transform:uppercase;margin-bottom:1px}
+.report-item-value{color:#333;font-weight:500;word-break:break-all}
+.report-item-value.mono{font-family:'SF Mono',Monaco,Consolas,monospace;font-size:10px}
+.report-item-value.good{color:#0ca678}
+.report-item-value.bad{color:#fa5252}
+
+/* === Check Lists === */
+.check-list{list-style:none;padding:0;margin:0}
+.check-list li{padding:6px 10px;margin-bottom:4px;border-radius:3px;font-size:11px}
+.check-list li.error{background:#fff5f5;border-left:2px solid #fa5252;color:#c92a2a}
+.check-list li.warning{background:#fff9db;border-left:2px solid #f59f00;color:#e67700}
+.check-list li.info{background:#e7f5ff;border-left:2px solid #339af0;color:#1971c2}
+.check-code{font-weight:600;font-family:'SF Mono',Monaco,Consolas,monospace;margin-right:6px;font-size:10px}
+.check-ref{color:#adb5bd;font-size:9px;margin-left:6px}
+
+/* === Metadata Table === */
+.meta-table{width:100%;border-collapse:collapse;font-size:11px;margin-top:6px}
+.meta-table th,.meta-table td{padding:5px 8px;text-align:left;border:1px solid #e9ecef}
+.meta-table th{background:#f8f9fa;font-weight:600;color:#495057;font-size:10px;text-transform:uppercase}
+
+/* === Tags === */
+.tags-inline{display:flex;flex-wrap:wrap;gap:8px}
+.tag-item{padding:4px 8px;background:#f1f3f5;border-radius:3px;font-size:11px}
+.tag-key{color:#868e96;font-size:9px;text-transform:uppercase}
+.tag-value{color:#333;margin-left:4px}
+
+/* === Toast === */
+.toast{
+    position:fixed;bottom:30px;right:30px;background:#333;color:#fff;
+    padding:10px 20px;border-radius:4px;opacity:0;transition:opacity .3s;z-index:2000;font-size:12px;
+}
+.toast.show{opacity:1}
+
+/* === Tabs === */
+.tab-nav{flex:0 0 auto;display:flex;gap:4px;margin-bottom:12px;border-bottom:2px solid #dee2e6;padding-bottom:0}
+.tab-btn{
+    padding:7px 18px;border:none;border-bottom:3px solid transparent;background:none;
+    cursor:pointer;font-size:13px;font-weight:500;color:#868e96;margin-bottom:-2px;
+    border-radius:4px 4px 0 0;transition:all .15s;
+}
+.tab-btn:hover{color:#333;background:#f8f9fa}
+.tab-btn-active{color:#228be6 !important;border-bottom-color:#228be6 !important}
+.tab-pane{flex:1 1 auto;display:flex;flex-direction:column;min-height:0}
+.tab-badge{display:inline-block;padding:1px 6px;border-radius:10px;font-size:10px;font-weight:600;margin-left:5px;vertical-align:middle}
+.tab-badge-warn{background:#fff9db;color:#f59f00;border:1px solid #ffec99}
+.tab-badge-none{background:#f1f3f5;color:#868e96;border:1px solid #dee2e6}
+</style>
 </head>
 <body>
-    <h1>FLAC Analysis Report</h1>
-    
+<h1>FLAC Validation Report &#8211; RFC 9639</h1>
+
+<!-- Tab navigation (shown by JS only when duplicates exist) -->
+<div class="tab-nav" id="tab-nav" style="display:none">
+    <button class="tab-btn tab-btn-active" data-tab="validation">&#10004;&#65039; Validation</button>
+    <button class="tab-btn" data-tab="duplicates">&#128269; Duplicates <span class="tab-badge" id="dupes-badge"></span></button>
+</div>
+
+<!-- Validation pane -->
+<div id="pane-validation" style="flex:1 1 auto;display:flex;flex-direction:column;min-height:0">
     <div class="summary">
-        <div class="summary-item"><strong>Total Files:</strong> {total_files:,}</div>
-        <div class="summary-item"><strong>Total Size:</strong> {total_size_gb:.2f} GB</div>
-        <div class="summary-item stat-valid"><strong>Valid:</strong> {valid_count:,}</div>
-        <div class="summary-item stat-warning"><strong>Warnings:</strong> {warning_count:,}</div>
-        <div class="summary-item stat-invalid"><strong>Invalid:</strong> {invalid_count:,}</div>
+        <div class="summary-item"><strong>Total Files:</strong> %%TOTAL_FILES%%</div>
+        <div class="summary-item"><strong>Total Size:</strong> %%TOTAL_SIZE_GB%% GB</div>
+        <div class="summary-item stat-valid"><strong>Valid:</strong> %%VALID_COUNT%%</div>
+        <div class="summary-item stat-warning"><strong>Warnings:</strong> %%WARNING_COUNT%%</div>
+        <div class="summary-item stat-invalid"><strong>Invalid:</strong> %%INVALID_COUNT%%</div>
     </div>
-    
     <div class="controls">
         <input type="text" id="search-input" class="search-box" placeholder="Filter records...">
         <button class="filter-btn active" data-filter="all">All</button>
@@ -271,119 +342,714 @@ def generate_html_report(df: pd.DataFrame, output_path: Path):
         <button class="filter-btn" data-filter="VALID (with warnings)">Warnings</button>
         <button class="filter-btn" data-filter="VALID">Valid</button>
     </div>
-
     <div id="table-container"></div>
-    <div id="toast" class="toast">Path copied!</div>
+</div>
 
-    <script>
-    const tableData = {data_json};
-    
-    function showToast(msg) {{
-        const toast = document.getElementById('toast');
-        toast.textContent = msg;
-        toast.classList.add('show');
-        setTimeout(() => toast.classList.remove('show'), 2000);
-    }}
-    
-    function copyToClipboard(text) {{
-        navigator.clipboard.writeText(text).then(() => showToast('Path copied!'));
-    }}
-    
-    // Status formatter with badge
-    function statusFormatter(cell) {{
-        const value = cell.getValue();
-        if (value === 'VALID') {{
-            return '<span class="status-badge status-valid">Valid</span>';
-        }} else if (value === 'INVALID') {{
-            return '<span class="status-badge status-invalid">Invalid</span>';
-        }} else {{
-            return '<span class="status-badge status-warning">Warning</span>';
-        }}
-    }}
-    
-    // File cell with copy button
-    function fileFormatter(cell) {{
-        const row = cell.getRow().getData();
-        const fullPath = row.file_path || '';
-        return `<div class="cell-file"><button class="copy-btn" onclick="copyToClipboard('${{fullPath.replace(/\\\\/g, '\\\\\\\\').replace(/'/g, "\\\\'")}}')" title="Copy path">📋</button>${{cell.getValue()}}</div>`;
-    }}
-    
-    // Folder cell with copy button  
-    function folderFormatter(cell) {{
-        const row = cell.getRow().getData();
-        const folderPath = row.folder_path || '';
-        return `<div class="cell-file"><button class="copy-btn" onclick="copyToClipboard('${{folderPath.replace(/\\\\/g, '\\\\\\\\').replace(/'/g, "\\\\'")}}')" title="Copy path">📋</button>${{cell.getValue()}}</div>`;
-    }}
+<!-- Duplicates pane -->
+<div id="pane-duplicates" style="display:none;flex-direction:column;min-height:0">
+    <div class="summary" id="dedupe-summary"></div>
+    <div class="controls">
+        <input type="text" id="dedupe-search" class="search-box" placeholder="Filter duplicates...">
+    </div>
+    <div id="dedupe-table"></div>
+</div>
 
-    // Initialize Tabulator with virtual DOM
-    const table = new Tabulator("#table-container", {{
-        data: tableData,
-        height: "100%",
-        layout: "fitDataStretch",
-        virtualDom: true,
-        virtualDomBuffer: 300,
-        placeholder: "No matching records found",
-        initialSort: [{{ column: "status_order", dir: "asc" }}],
-        columns: [
-            {{ title: "File", field: "file", formatter: fileFormatter, minWidth: 250, headerFilter: false }},
-            {{ title: "Folder", field: "folder", formatter: folderFormatter, minWidth: 150 }},
-            {{ title: "Status", field: "status", formatter: statusFormatter, width: 110, hozAlign: "center" }},
-            {{ title: "", field: "status_order", visible: false }},
-            {{ title: "Errors", field: "errors", formatter: "html", cssClass: "cell-errors", minWidth: 300, formatter: function(cell) {{
-                return '<div class="cell-errors">' + (cell.getValue() || '').replace(/\\n/g, '<br>') + '</div>';
-            }} }},
-            {{ title: "Warnings", field: "warnings", minWidth: 250, formatter: function(cell) {{
-                return '<div class="cell-warnings">' + (cell.getValue() || '').replace(/\\n/g, '<br>') + '</div>';
-            }} }},
-            {{ title: "Duration", field: "duration", width: 90, hozAlign: "center" }},
-            {{ title: "Sample Rate", field: "sample_rate", width: 110, hozAlign: "right" }},
-            {{ title: "Bits", field: "bits_per_sample", width: 70, hozAlign: "center" }},
-            {{ title: "Ch", field: "channels", width: 50, hozAlign: "center" }},
-            {{ title: "Bitrate", field: "bitrate_kbps", width: 90, hozAlign: "right", formatter: function(cell) {{
-                return cell.getValue() ? cell.getValue() + ' kbps' : '';
-            }} }},
-            {{ title: "Size (MB)", field: "filesize_mb", width: 100, hozAlign: "right" }},
-            {{ title: "Artist", field: "artist", minWidth: 150 }},
-            {{ title: "Album", field: "album", minWidth: 150 }},
-            {{ title: "Title", field: "title", minWidth: 200 }},
-            {{ title: "Track", field: "tracknumber", width: 70, hozAlign: "center" }},
-            {{ title: "Genre", field: "genre", width: 120 }},
-            {{ title: "Date", field: "date", width: 80 }},
-            {{ title: "RG Gain", field: "replaygain_track_gain", width: 100 }},
-        ],
-    }});
+<!-- Detail report modal -->
+<div id="report-modal" class="modal-overlay">
+    <div class="modal">
+        <div class="modal-header">
+            <h2 id="modal-title">RFC 9639 Validation Report</h2>
+            <button class="modal-close" id="modal-close-btn">&times;</button>
+        </div>
+        <div class="modal-body" id="modal-body"></div>
+        <div class="modal-footer">
+            <button class="modal-btn modal-btn-secondary" data-copy-fmt="text">&#128203; Copy Text</button>
+            <button class="modal-btn modal-btn-secondary" data-copy-fmt="json">{} Copy JSON</button>
+            <button class="modal-btn modal-btn-secondary" data-copy-fmt="markdown">&#128221; Copy Markdown</button>
+            <button class="modal-btn modal-btn-primary" id="modal-close-btn2">Close</button>
+        </div>
+    </div>
+</div>
+
+<div id="toast" class="toast">Copied!</div>
+
+<!-- Data payloads (parsed by JS, never rendered as HTML) -->
+<script id="table-data" type="application/json">%%TABLE_DATA%%</script>
+<script id="dedupe-data" type="application/json">%%DEDUPE_DATA%%</script>
+
+<script>
+(function() {
+"use strict";
+
+// ====== Data ======
+var tableData = [];
+var DEDUPE_DATA = [];
+try {
+    tableData  = JSON.parse(document.getElementById("table-data").textContent  || "[]");
+    DEDUPE_DATA = JSON.parse(document.getElementById("dedupe-data").textContent || "[]");
+} catch(e) {
+    console.error("Failed to parse report data:", e);
+}
+
+var HAS_DUPES_TAB = %%HAS_DUPES_TAB%%;
+var DEDUPE_STATS  = {groups: %%DEDUPE_GROUPS%%, files: %%DEDUPE_FILES%%, strict: %%DEDUPE_STRICT%%};
+var GROUP_COLORS  = ["#e3f2fd","#f1f8e9","#fff3e0"];
+var currentReportData = null;
+var table = null;
+var dedupeTable = null;
+
+var TAG_KEYS = ["artist","album","title","tracknumber","genre","date","albumartist",
+                "replaygain_track_gain","replaygain_track_peak"];
+var BLOCK_TYPES = {0:"STREAMINFO",1:"PADDING",2:"APPLICATION",3:"SEEKTABLE",
+                   4:"VORBIS_COMMENT",5:"CUESHEET",6:"PICTURE"};
+
+// ====== Utilities ======
+
+function escapeHtml(text) {
+    if (!text) return "";
+    return String(text)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+}
+
+function escapeAttr(text) {
+    if (!text) return "";
+    return String(text)
+        .replace(/&/g, "&amp;")
+        .replace(/"/g, "&quot;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+}
+
+function showToast(msg) {
+    var t = document.getElementById("toast");
+    t.textContent = msg;
+    t.classList.add("show");
+    setTimeout(function(){ t.classList.remove("show"); }, 2000);
+}
+
+function copyToClipboard(text, msg) {
+    navigator.clipboard.writeText(text).then(function(){ showToast(msg || "Copied!"); });
+}
+
+function getAudioQuality(sr, bps) {
+    if (sr >= 192000) return {label:"Hi-Res 192kHz", cls:"quality-hires"};
+    if (sr >= 96000)  return {label:"Hi-Res 96kHz",  cls:"quality-hires"};
+    if (sr >= 48000)  return {label: bps > 16 ? "Hi-Res 48kHz" : "Enhanced", cls:"quality-hires"};
+    if (sr >= 44100)  return {label:"CD Quality", cls:"quality-cd"};
+    return {label:"Low Quality", cls:"quality-low"};
+}
+
+/** Collapse repeated error/warning lines (e.g. many frames with same issue). */
+function groupedIssues(str) {
+    if (!str) return "";
+    var lines = str.split("\n").filter(function(l){ return l.trim(); });
+    var groups = {}, order = [];
+    for (var i = 0; i < lines.length; i++) {
+        var key = lines[i].replace(/ Frame \d+:/, ":");
+        if (!groups[key]) { groups[key] = {text: key, count: 0}; order.push(key); }
+        groups[key].count++;
+    }
+    return order.map(function(k) {
+        var g = groups[k];
+        return escapeHtml(g.count > 1 ? g.text + " (\u00d7" + g.count + ")" : g.text);
+    }).join("<br>");
+}
+
+// ====== Modal ======
+
+function closeModal() {
+    document.getElementById("report-modal").classList.remove("active");
+}
+
+function gridItem(label, value, cls) {
+    return '<div class="report-item"><div class="report-item-label">' + escapeHtml(label) +
+           '</div><div class="report-item-value' + (cls ? " " + cls : "") + '">' +
+           escapeHtml(String(value)) + "</div></div>";
+}
+
+function gridItemMono(label, value, cls) {
+    return '<div class="report-item"><div class="report-item-label">' + escapeHtml(label) +
+           '</div><div class="report-item-value mono' + (cls ? " " + cls : "") + '">' +
+           escapeHtml(String(value)) + "</div></div>";
+}
+
+function checkListHtml(items, cls, title) {
+    if (!items || !items.length) return "";
+    var h = '<div class="report-section"><h3>' + title + "</h3><ul class=\"check-list\">";
+    items.forEach(function(item) {
+        h += '<li class="' + cls + '"><span class="check-code">' + escapeHtml(item.code) +
+             "</span>" + escapeHtml(item.message) +
+             '<span class="check-ref">' + escapeHtml(item.reference) + "</span></li>";
+    });
+    return h + "</ul></div>";
+}
+
+function openReport(rowData) {
+    if (!rowData) return;
+    currentReportData = rowData;
+
+    var rfc = {};
+    try { rfc = JSON.parse(rowData.rfc9639_json || "{}"); } catch(e) { /* ignore */ }
+    var si = rfc.streaminfo || {};
+
+    document.getElementById("modal-title").textContent = rowData.file;
+
+    var quality = getAudioQuality(
+        si.sample_rate || rowData.sample_rate || 0,
+        si.bits_per_sample || rowData.bits_per_sample || 16
+    );
+    var blockStrategy = (si.min_block_size === si.max_block_size) ? "Fixed" : "Variable";
+
+    var h = "";
+
+    // File & Audio
+    h += '<div class="report-section"><h3>&#128193; File &amp; Audio</h3><div class="report-grid">';
+    h += gridItem("Status", rowData.status, rowData.status === "VALID" ? "good" : (rowData.status === "INVALID" ? "bad" : ""));
+    h += gridItem("Quality", quality.label, quality.cls);
+    h += gridItem("Duration", rowData.duration || "N/A");
+    h += gridItem("Size", (rowData.filesize_mb || 0).toFixed(2) + " MB");
+    h += gridItem("Sample Rate", (si.sample_rate || rowData.sample_rate || 0).toLocaleString() + " Hz");
+    h += gridItem("Bit Depth", (si.bits_per_sample || rowData.bits_per_sample || "N/A") + " bit");
+    h += gridItem("Channels", si.channels || rowData.channels || "N/A");
+    h += gridItem("Bitrate", (rowData.bitrate_kbps || 0) + " kbps");
+    h += gridItem("Block Size", blockStrategy + " (" + (si.min_block_size || 0) + ")");
+    h += gridItem("Total Samples", (si.total_samples || 0).toLocaleString());
+    h += gridItem("Audio Offset", (rfc.audio_offset || 0).toLocaleString() + " bytes");
+    h += gridItem("Audio Size", ((rfc.audio_size || 0) / 1024 / 1024).toFixed(2) + " MB");
+    h += "</div></div>";
+
+    // MD5
+    var md5Match = rowData.md5_header && rowData.md5_calculated && rowData.md5_header === rowData.md5_calculated;
+    h += '<div class="report-section"><h3>&#128274; MD5 Verification</h3><div class="report-grid report-grid-2col">';
+    h += gridItemMono("Header MD5", si.md5_signature || rowData.md5_header || "N/A");
+    h += gridItemMono("Calculated MD5", rowData.md5_calculated || "N/A", md5Match ? "good" : "bad");
+    h += "</div></div>";
+
+    // Tags
+    var tags = TAG_KEYS.filter(function(k){ return rowData[k]; });
+    if (tags.length) {
+        h += '<div class="report-section"><h3>&#127991;&#65039; Tags</h3><div class="tags-inline">';
+        tags.forEach(function(k) {
+            h += '<span class="tag-item"><span class="tag-key">' + escapeHtml(k) +
+                 '</span><span class="tag-value">' + escapeHtml(String(rowData[k])) + "</span></span>";
+        });
+        h += "</div></div>";
+    }
+
+    // Metadata blocks
+    if (rfc.metadata_blocks && rfc.metadata_blocks.length) {
+        h += '<div class="report-section"><h3>&#128230; Metadata Blocks</h3>';
+        h += '<table class="meta-table"><tr><th>Type</th><th>Size</th><th>Offset</th></tr>';
+        rfc.metadata_blocks.forEach(function(b) {
+            var name = BLOCK_TYPES[b.type] || ("#" + b.type);
+            h += "<tr><td>" + escapeHtml(name) + (b.is_last ? " &#10003;" : "") +
+                 "</td><td>" + b.length + " B</td><td>" + b.offset + "</td></tr>";
+        });
+        h += "</table></div>";
+    }
+
+    // Errors, Warnings, Infos
+    h += checkListHtml(rfc.errors,   "error",   "&#128308; Errors");
+    h += checkListHtml(rfc.warnings, "warning", "&#128993; Warnings");
+    h += checkListHtml(rfc.infos,    "info",    "&#128309; Information");
+
+    document.getElementById("modal-body").innerHTML = h;
+    document.getElementById("report-modal").classList.add("active");
+}
+
+// ====== Copy Report ======
+
+function copyReport(format) {
+    if (!currentReportData) return;
+    var d = currentReportData;
+
+    var rfc = {};
+    try { rfc = JSON.parse(d.rfc9639_json || "{}"); } catch(e) { /* ignore */ }
+    var si = rfc.streaminfo || {};
+    var quality = getAudioQuality(si.sample_rate || d.sample_rate || 0, si.bits_per_sample || d.bits_per_sample || 16);
+    var blockStrategy = (si.min_block_size === si.max_block_size) ? "Fixed" : "Variable";
+
+    var text = "";
+
+    if (format === "json") {
+        var obj = {
+            file: {path: d.file_path, name: d.file, status: d.status,
+                   size_mb: d.filesize_mb || 0, duration: d.duration || null},
+            audio: {quality: quality.label,
+                    sample_rate: si.sample_rate || d.sample_rate || null,
+                    bits_per_sample: si.bits_per_sample || d.bits_per_sample || null,
+                    channels: si.channels || d.channels || null,
+                    bitrate_kbps: d.bitrate_kbps || null,
+                    total_samples: si.total_samples || null,
+                    block_size_strategy: blockStrategy.toLowerCase(),
+                    min_block_size: si.min_block_size || null,
+                    max_block_size: si.max_block_size || null,
+                    audio_offset: rfc.audio_offset || null,
+                    audio_size_mb: rfc.audio_size ? (rfc.audio_size / 1024 / 1024).toFixed(2) : null},
+            md5: {header: si.md5_signature || d.md5_header || null,
+                  calculated: d.md5_calculated || null,
+                  match: !!(d.md5_header && d.md5_calculated && d.md5_header === d.md5_calculated)},
+            tags: {},
+            metadata_blocks: (rfc.metadata_blocks || []).map(function(b){
+                return {type: BLOCK_TYPES[b.type] || "#"+b.type, type_id: b.type,
+                        size: b.length, offset: b.offset, is_last: b.is_last};
+            }),
+            validation: {is_valid: rfc.is_valid || false,
+                         errors: rfc.errors || [], warnings: rfc.warnings || [], infos: rfc.infos || []}
+        };
+        TAG_KEYS.forEach(function(k){ if (d[k]) obj.tags[k] = d[k]; });
+        text = JSON.stringify(obj, null, 2);
+
+    } else if (format === "markdown") {
+        text  = "# FLAC Validation Report\n\n";
+        text += "## File\n| Property | Value |\n|----------|-------|\n";
+        text += "| **Path** | `" + d.file_path + "` |\n";
+        text += "| **Status** | " + d.status + " |\n";
+        text += "| **Size** | " + (d.filesize_mb || 0).toFixed(2) + " MB |\n";
+        text += "| **Duration** | " + (d.duration || "N/A") + " |\n\n";
+        text += "## Audio\n| Property | Value |\n|----------|-------|\n";
+        text += "| **Quality** | " + quality.label + " |\n";
+        text += "| **Sample Rate** | " + (si.sample_rate || d.sample_rate || 0).toLocaleString() + " Hz |\n";
+        text += "| **Bit Depth** | " + (si.bits_per_sample || d.bits_per_sample || "N/A") + " bit |\n";
+        text += "| **Channels** | " + (si.channels || d.channels || "N/A") + " |\n";
+        text += "| **Bitrate** | " + (d.bitrate_kbps || 0) + " kbps |\n";
+        text += "| **Total Samples** | " + (si.total_samples || 0).toLocaleString() + " |\n";
+        text += "| **Block Size** | " + blockStrategy + " (" + (si.min_block_size || 0) + ") |\n";
+        text += "| **Audio Offset** | " + (rfc.audio_offset || 0).toLocaleString() + " bytes |\n";
+        text += "| **Audio Size** | " + ((rfc.audio_size || 0) / 1024 / 1024).toFixed(2) + " MB |\n\n";
+        text += "## MD5\n| Type | Value |\n|------|-------|\n";
+        text += "| Header | `" + (si.md5_signature || d.md5_header || "N/A") + "` |\n";
+        text += "| Calculated | `" + (d.md5_calculated || "N/A") + "` |\n\n";
+        var tagsFound = TAG_KEYS.filter(function(k){ return d[k]; });
+        if (tagsFound.length) {
+            text += "## Tags\n| Tag | Value |\n|-----|-------|\n";
+            tagsFound.forEach(function(k){ text += "| " + k + " | " + String(d[k]) + " |\n"; });
+            text += "\n";
+        }
+        if (rfc.metadata_blocks && rfc.metadata_blocks.length) {
+            text += "## Metadata Blocks\n| Type | Size | Offset |\n|------|------|--------|\n";
+            rfc.metadata_blocks.forEach(function(b){
+                var name = BLOCK_TYPES[b.type] || "#"+b.type;
+                text += "| " + name + (b.is_last ? " \u2713" : "") + " | " + b.length + " B | " + b.offset + " |\n";
+            });
+            text += "\n";
+        }
+        if (rfc.errors && rfc.errors.length) {
+            text += "## Errors (" + rfc.errors.length + ")\n";
+            rfc.errors.forEach(function(e){ text += "- **[" + e.code + "]** " + e.message + " (" + e.reference + ")\n"; });
+            text += "\n";
+        }
+        if (rfc.warnings && rfc.warnings.length) {
+            text += "## Warnings (" + rfc.warnings.length + ")\n";
+            rfc.warnings.forEach(function(w){ text += "- **[" + w.code + "]** " + w.message + " (" + w.reference + ")\n"; });
+            text += "\n";
+        }
+        if (rfc.infos && rfc.infos.length) {
+            text += "## Information (" + rfc.infos.length + ")\n";
+            rfc.infos.forEach(function(i){ text += "- **[" + i.code + "]** " + i.message + " (" + i.reference + ")\n"; });
+        }
+
+    } else {
+        // Plain text
+        text  = "FLAC Validation Report\n" + "=".repeat(50) + "\n\n";
+        text += "File: " + d.file_path + "\n";
+        text += "Status: " + d.status + "\n";
+        text += "Size: " + (d.filesize_mb || 0).toFixed(2) + " MB\n";
+        text += "Duration: " + (d.duration || "N/A") + "\n\n";
+        text += "Audio:\n";
+        text += "  Quality: " + quality.label + "\n";
+        text += "  Sample Rate: " + (si.sample_rate || d.sample_rate || 0).toLocaleString() + " Hz\n";
+        text += "  Bit Depth: " + (si.bits_per_sample || d.bits_per_sample || "N/A") + " bit\n";
+        text += "  Channels: " + (si.channels || d.channels || "N/A") + "\n";
+        text += "  Bitrate: " + (d.bitrate_kbps || 0) + " kbps\n";
+        text += "  Total Samples: " + (si.total_samples || 0).toLocaleString() + "\n";
+        text += "  Block Size: " + blockStrategy + " (" + (si.min_block_size || 0) + ")\n";
+        text += "  Audio Offset: " + (rfc.audio_offset || 0).toLocaleString() + " bytes\n";
+        text += "  Audio Size: " + ((rfc.audio_size || 0) / 1024 / 1024).toFixed(2) + " MB\n\n";
+        text += "MD5:\n";
+        text += "  Header:     " + (si.md5_signature || d.md5_header || "N/A") + "\n";
+        text += "  Calculated: " + (d.md5_calculated || "N/A") + "\n\n";
+        var tagsF = TAG_KEYS.filter(function(k){ return d[k]; });
+        if (tagsF.length) {
+            text += "Tags:\n";
+            tagsF.forEach(function(k){ text += "  " + k + ": " + String(d[k]) + "\n"; });
+            text += "\n";
+        }
+        if (rfc.metadata_blocks && rfc.metadata_blocks.length) {
+            text += "Metadata Blocks (" + rfc.metadata_blocks.length + "):\n";
+            rfc.metadata_blocks.forEach(function(b){
+                var name = BLOCK_TYPES[b.type] || "#"+b.type;
+                text += "  " + name + (b.is_last ? " (last)" : "") + ": " + b.length + " B at offset " + b.offset + "\n";
+            });
+            text += "\n";
+        }
+        if (rfc.errors && rfc.errors.length) {
+            text += "ERRORS (" + rfc.errors.length + "):\n";
+            rfc.errors.forEach(function(e){ text += "  [" + e.code + "] " + e.message + " (" + e.reference + ")\n"; });
+            text += "\n";
+        }
+        if (rfc.warnings && rfc.warnings.length) {
+            text += "WARNINGS (" + rfc.warnings.length + "):\n";
+            rfc.warnings.forEach(function(w){ text += "  [" + w.code + "] " + w.message + " (" + w.reference + ")\n"; });
+            text += "\n";
+        }
+        if (rfc.infos && rfc.infos.length) {
+            text += "INFO (" + rfc.infos.length + "):\n";
+            rfc.infos.forEach(function(i){ text += "  [" + i.code + "] " + i.message + " (" + i.reference + ")\n"; });
+        }
+    }
+
+    navigator.clipboard.writeText(text).then(function(){ showToast(format.toUpperCase() + " copied!"); });
+}
+
+// ====== Formatters ======
+
+function statusFormatter(cell) {
+    var v = cell.getValue();
+    if (v === "VALID")   return '<span class="status-badge status-valid">Valid</span>';
+    if (v === "INVALID") return '<span class="status-badge status-invalid">Invalid</span>';
+    return '<span class="status-badge status-warning">Warning</span>';
+}
+
+function fileFormatter(cell) {
+    var row = cell.getRow().getData();
+    return '<div class="cell-file"><button class="copy-btn" data-copy-path="' +
+           escapeAttr(row.file_path || "") + '" title="Copy path">&#128203;</button>' +
+           escapeHtml(cell.getValue()) + "</div>";
+}
+
+function folderFormatter(cell) {
+    var row = cell.getRow().getData();
+    return '<div class="cell-file"><button class="copy-btn" data-copy-path="' +
+           escapeAttr(row.folder_path || "") + '" title="Copy path">&#128203;</button>' +
+           escapeHtml(cell.getValue()) + "</div>";
+}
+
+// ====== Height Calculation ======
+
+/** Use actual element position instead of hardcoded pixel offsets. */
+function calcTableHeight() {
+    var el = document.getElementById("table-container");
+    if (!el) return 400;
+    var top = el.getBoundingClientRect().top;
+    return Math.max(200, window.innerHeight - top - 20);
+}
+
+function calcDedupeHeight() {
+    var el = document.getElementById("dedupe-table");
+    if (!el) return 400;
+    var top = el.getBoundingClientRect().top;
+    return Math.max(200, window.innerHeight - top - 20);
+}
+
+// ====== Initialization ======
+
+document.addEventListener("DOMContentLoaded", function() {
+    // Verify Tabulator loaded
+    if (typeof Tabulator === "undefined") {
+        document.getElementById("table-container").innerHTML =
+            '<div style="padding:20px;color:#e03131;background:#fff5f5;border:1px solid #ffc9c9;border-radius:6px;margin:20px">' +
+            '<h3>&#9888;&#65039; Error: Library failed to load</h3>' +
+            '<p>The Tabulator.js library could not be loaded. This report requires an internet connection.</p>' +
+            '<p>Check if unpkg.com is blocked by your firewall or adblocker.</p></div>';
+        return;
+    }
+
+    try {
+        table = new Tabulator("#table-container", {
+            data: tableData,
+            height: calcTableHeight() + "px",
+            layout: "fitDataStretch",
+            placeholder: "No matching records found",
+            initialSort: [{column: "status_order", dir: "asc"}],
+            columns: [
+                {title: "File",   field: "file",   formatter: fileFormatter,   minWidth: 250},
+                {title: "Folder", field: "folder", formatter: folderFormatter, minWidth: 150},
+                {title: "Status", field: "status", formatter: statusFormatter, width: 110, hozAlign: "center"},
+                {title: "", field: "status_order",  visible: false},
+                {title: "", field: "rfc9639_json",  visible: false},
+                {title: "Report", formatter: function(){ return '<button class="report-btn">&#128196; Report</button>'; },
+                    width: 80, hozAlign: "center", headerSort: false,
+                    cellClick: function(e, cell){ openReport(cell.getRow().getData()); }
+                },
+                {title: "Errors",   field: "errors",   minWidth: 300, formatter: function(c){ return '<div class="cell-errors">'   + groupedIssues(c.getValue()) + "</div>"; }},
+                {title: "Warnings", field: "warnings", minWidth: 250, formatter: function(c){ return '<div class="cell-warnings">' + groupedIssues(c.getValue()) + "</div>"; }},
+                {title: "Duration",    field: "duration",        width: 90,  hozAlign: "center"},
+                {title: "Sample Rate", field: "sample_rate",     width: 110, hozAlign: "right",  sorter: "number"},
+                {title: "Bits",        field: "bits_per_sample", width: 70,  hozAlign: "center", sorter: "number"},
+                {title: "Ch",          field: "channels",        width: 50,  hozAlign: "center", sorter: "number"},
+                {title: "Bitrate",     field: "bitrate_kbps",    width: 90,  hozAlign: "right",  sorter: "number",
+                    formatter: function(c){ return c.getValue() ? c.getValue() + " kbps" : ""; }},
+                {title: "Size (MB)",   field: "filesize_mb",     width: 100, hozAlign: "right",  sorter: "number"},
+                {title: "Artist", field: "artist",       minWidth: 150},
+                {title: "Album",  field: "album",        minWidth: 150},
+                {title: "Title",  field: "title",        minWidth: 200},
+                {title: "Track",  field: "tracknumber",  width: 70,  hozAlign: "center", sorter: "number"},
+                {title: "Genre",  field: "genre",        width: 120},
+                {title: "Date",   field: "date",         width: 80},
+                {title: "RG Gain",field: "replaygain_track_gain", width: 100}
+            ]
+        });
+    } catch(e) {
+        console.error("Tabulator Init Error:", e);
+        document.getElementById("table-container").innerHTML =
+            '<div style="padding:20px;color:#e03131">Failed to initialize table: ' + escapeHtml(e.message) + "</div>";
+        return;
+    }
 
     // Global search
-    document.getElementById('search-input').addEventListener('input', function(e) {{
-        const value = e.target.value.toLowerCase();
-        table.setFilter(function(data) {{
-            return Object.values(data).some(v => 
-                String(v).toLowerCase().includes(value)
-            );
-        }});
-    }});
-    
+    document.getElementById("search-input").addEventListener("input", function(e) {
+        var val = e.target.value.toLowerCase();
+        if (!val) { table.clearFilter(); return; }
+        table.setFilter(function(data) {
+            return Object.values(data).some(function(v){ return String(v).toLowerCase().includes(val); });
+        });
+    });
+
     // Status filter buttons
-    document.querySelectorAll('.filter-btn').forEach(btn => {{
-        btn.addEventListener('click', function() {{
-            document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
-            this.classList.add('active');
-            
-            const filter = this.dataset.filter;
-            if (filter === 'all') {{
-                table.clearFilter();
-            }} else {{
-                table.setFilter("status", "=", filter);
-            }}
-        }});
-    }});
-    </script>
+    document.querySelectorAll(".filter-btn").forEach(function(btn) {
+        btn.addEventListener("click", function() {
+            document.querySelectorAll(".filter-btn").forEach(function(b){ b.classList.remove("active"); });
+            this.classList.add("active");
+            var f = this.dataset.filter;
+            if (f === "all") table.clearFilter();
+            else table.setFilter("status", "=", f);
+        });
+    });
+
+    // Keep table height in sync with window
+    window.addEventListener("resize", function() {
+        if (table) table.setHeight(calcTableHeight() + "px");
+        if (dedupeTable) dedupeTable.setHeight(calcDedupeHeight() + "px");
+    });
+
+    // Delegated click: copy-path buttons & copy-format buttons
+    document.addEventListener("click", function(e) {
+        var cpBtn = e.target.closest("[data-copy-path]");
+        if (cpBtn) { e.stopPropagation(); copyToClipboard(cpBtn.getAttribute("data-copy-path"), "Path copied!"); return; }
+        var fmtBtn = e.target.closest("[data-copy-fmt]");
+        if (fmtBtn) { copyReport(fmtBtn.getAttribute("data-copy-fmt")); return; }
+    });
+
+    // Modal close handlers
+    document.getElementById("modal-close-btn").addEventListener("click", closeModal);
+    document.getElementById("modal-close-btn2").addEventListener("click", closeModal);
+    document.getElementById("report-modal").addEventListener("click", function(e) {
+        if (e.target === this) closeModal();
+    });
+
+    // Keyboard shortcut: Escape closes modal
+    document.addEventListener("keydown", function(e) {
+        if (e.key === "Escape") closeModal();
+    });
+
+    // ---- Tab navigation (active only when HAS_DUPES_TAB is true) ----
+    if (HAS_DUPES_TAB) {
+        document.getElementById("tab-nav").style.display = "flex";
+
+        var badge = document.getElementById("dupes-badge");
+        if (DEDUPE_STATS.groups > 0) {
+            badge.className = "tab-badge tab-badge-warn";
+            badge.textContent = DEDUPE_STATS.groups + " group" + (DEDUPE_STATS.groups > 1 ? "s" : "");
+        } else {
+            badge.className = "tab-badge tab-badge-none";
+            badge.textContent = "None";
+        }
+
+        document.getElementById("dedupe-summary").innerHTML =
+            '<div class="summary-item"><strong>Duplicate Groups:</strong> ' + DEDUPE_STATS.groups + "</div>" +
+            '<div class="summary-item"><strong>Total Duplicate Files:</strong> ' + DEDUPE_STATS.files + "</div>" +
+            '<div class="summary-item stat-invalid"><strong>Strict Sets:</strong> ' + DEDUPE_STATS.strict + "</div>";
+
+        document.querySelectorAll(".tab-btn").forEach(function(btn) {
+            btn.addEventListener("click", function(){ switchTab(this.dataset.tab); });
+        });
+    }
+});
+
+// ====== Tab Switching ======
+
+var dedupeTableInit = false;
+
+function switchTab(tab) {
+    ["validation","duplicates"].forEach(function(t) {
+        var pane = document.getElementById("pane-" + t);
+        if (pane) pane.style.display = (t === tab) ? "flex" : "none";
+    });
+    document.querySelectorAll(".tab-btn").forEach(function(btn) {
+        btn.classList.toggle("tab-btn-active", btn.dataset.tab === tab);
+    });
+    if (tab === "duplicates" && !dedupeTableInit) {
+        dedupeTableInit = true;
+        initDedupeTable();
+    }
+}
+
+// ====== Dedupe Table ======
+
+function initDedupeTable() {
+    if (!DEDUPE_DATA.length) {
+        document.getElementById("dedupe-table").innerHTML =
+            '<p style="color:#868e96;padding:20px 0">No audio duplicates found in this scan.</p>';
+        return;
+    }
+    if (typeof Tabulator === "undefined") return;
+
+    try {
+        dedupeTable = new Tabulator("#dedupe-table", {
+            data: DEDUPE_DATA,
+            layout: "fitDataStretch",
+            height: calcDedupeHeight() + "px",
+            placeholder: "No duplicates found",
+            rowFormatter: function(row) {
+                var g = row.getData().group;
+                row.getElement().style.backgroundColor = GROUP_COLORS[(g - 1) % GROUP_COLORS.length];
+            },
+            columns: [
+                {title: "Group", field: "group", width: 70, hozAlign: "center", sorter: "number"},
+                {title: "File", field: "filename", minWidth: 200, formatter: function(cell) {
+                    var d = cell.getRow().getData();
+                    return '<div class="cell-file"><button class="copy-btn" data-copy-path="' +
+                           escapeAttr(d.filepath) + '" title="Copy full path">&#128203;</button><span title="' +
+                           escapeAttr(d.filepath) + '">' + escapeHtml(d.filename) + "</span></div>";
+                }},
+                {title: "Folder", field: "foldername", minWidth: 140, formatter: function(cell) {
+                    var d = cell.getRow().getData();
+                    return '<div class="cell-file"><button class="copy-btn" data-copy-path="' +
+                           escapeAttr(d.folder) + '" title="Copy folder">&#128203;</button>' +
+                           '<a href="' + escapeAttr(d.folderuri) + '" class="copy-btn" title="Open folder" style="text-decoration:none">&#128194;</a>' +
+                           '<span title="' + escapeAttr(d.folder) + '">' + escapeHtml(d.foldername) + "</span></div>";
+                }},
+                {title: "Type", field: "type", width: 104, hozAlign: "center", formatter: function(cell) {
+                    var v = cell.getValue();
+                    return '<span class="status-badge ' + (v === "Strict" ? "status-invalid" : "status-warning") + '">' + escapeHtml(v) + "</span>";
+                }},
+                {title: "Audio MD5", field: "md5", width: 155, formatter: function(cell) {
+                    var v = cell.getValue() || "";
+                    return '<span style="font-family:monospace;font-size:11px;color:#868e96" title="' +
+                           escapeAttr(v) + '">' + escapeHtml(v.substring(0, 16)) + "\u2026</span>";
+                }},
+                {title: "Artist",   field: "artist", minWidth: 110},
+                {title: "Album",    field: "album",  minWidth: 110},
+                {title: "Title",    field: "title",  minWidth: 120},
+                {title: "Size (MB)",field: "size",   width: 90, hozAlign: "right", sorter: "number"}
+            ],
+            initialSort: [{column: "group", dir: "asc"}]
+        });
+
+        document.getElementById("dedupe-search").addEventListener("input", function() {
+            var val = this.value.toLowerCase();
+            if (!val) { dedupeTable.clearFilter(); return; }
+            dedupeTable.setFilter(function(data) {
+                return Object.values(data).some(function(v){ return String(v).toLowerCase().includes(val); });
+            });
+        });
+    } catch(e) {
+        console.error("Dedupe Tabulator Init Error:", e);
+    }
+}
+
+})();
+</script>
 </body>
 </html>"""
-    
+
+
+def generate_html_report(df: pd.DataFrame, output_path: Path, duplicate_groups=None):
+    """
+    Generates a high-performance HTML report using Tabulator.js with virtual DOM.
+    Handles 100,000+ rows efficiently by only rendering visible rows.
+    Includes RFC 9639 validation popup with copy functionality.
+    Optionally includes a Duplicates tab when duplicate_groups is provided.
+
+    Architecture: uses %%MARKER%% placeholder template so that JavaScript code
+    keeps normal braces — no fragile f-string doubling needed.
+    """
+    if df.empty:
+        logging.warning("DataFrame is empty, cannot generate HTML report.")
+        return
+
+    # --- Data preparation ------------------------------------------------
+    df_clean = df.fillna('')
+    data_json = _safe_json_for_html(
+        df_clean.to_json(orient='records', force_ascii=False)
+    )
+
+    # --- Dedupe tab data -------------------------------------------------
+    has_dupes_tab = duplicate_groups is not None
+    dedupe_rows: list = []
+    dedupe_total_groups = 0
+    dedupe_total_files  = 0
+    dedupe_strict_sets  = 0
+
+    if has_dupes_tab and duplicate_groups:
+        from mutagen.flac import FLAC
+        for group_idx, grp in enumerate(duplicate_groups, 1):
+            for f in grp.files:
+                is_strict = any(f in sg for sg in grp.strict_groups)
+                try:
+                    audio   = FLAC(f)
+                    artist  = (audio.get('artist') or [''])[0]
+                    album   = (audio.get('album')  or [''])[0]
+                    title   = (audio.get('title')  or [''])[0]
+                    size_mb = round(f.stat().st_size / (1024 * 1024), 2)
+                except Exception:
+                    artist = album = title = ""
+                    size_mb = 0
+                dedupe_rows.append({
+                    "group":      group_idx,
+                    "filename":   f.name,
+                    "filepath":   str(f),
+                    "folder":     str(f.parent),
+                    "foldername": f.parent.name,
+                    "folderuri":  f.parent.as_uri(),
+                    "type":       "Strict" if is_strict else "Audio-Only",
+                    "md5":        grp.audio_md5,
+                    "artist":     artist,
+                    "album":      album,
+                    "title":      title,
+                    "size":       size_mb,
+                })
+        dedupe_total_groups = len(duplicate_groups)
+        dedupe_total_files  = sum(len(g.files) for g in duplicate_groups)
+        dedupe_strict_sets  = sum(len(g.strict_groups) for g in duplicate_groups)
+
+    dedupe_data_json = _safe_json_for_html(
+        json.dumps(dedupe_rows, ensure_ascii=False)
+    )
+
+    # --- Summary stats ---------------------------------------------------
+    total_files   = len(df)
+    total_size_gb = df['filesize_mb'].sum() / 1024 if 'filesize_mb' in df.columns else 0
+    invalid_count = len(df[df['status'] == 'INVALID'])
+    warning_count = len(df[df['status'] == 'VALID (with warnings)'])
+    valid_count   = len(df[df['status'] == 'VALID'])
+
+    # --- Build HTML via placeholder substitution -------------------------
+    # Replace scalar placeholders first (they cannot contain %%...%% markers),
+    # then data payloads last (which could theoretically contain marker-like text).
+    html = _HTML_TEMPLATE
+    html = html.replace('%%TOTAL_FILES%%',   f'{total_files:,}')
+    html = html.replace('%%TOTAL_SIZE_GB%%', f'{total_size_gb:.2f}')
+    html = html.replace('%%VALID_COUNT%%',   f'{valid_count:,}')
+    html = html.replace('%%WARNING_COUNT%%', f'{warning_count:,}')
+    html = html.replace('%%INVALID_COUNT%%', f'{invalid_count:,}')
+    html = html.replace('%%HAS_DUPES_TAB%%', 'true' if has_dupes_tab else 'false')
+    html = html.replace('%%DEDUPE_GROUPS%%', str(dedupe_total_groups))
+    html = html.replace('%%DEDUPE_FILES%%',  str(dedupe_total_files))
+    html = html.replace('%%DEDUPE_STRICT%%', str(dedupe_strict_sets))
+    # Data payloads last
+    html = html.replace('%%TABLE_DATA%%',    data_json)
+    html = html.replace('%%DEDUPE_DATA%%',   dedupe_data_json)
+
+    # --- Write -----------------------------------------------------------
     try:
         with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(html_content)
+            f.write(html)
         logging.info(f"HTML report generated: {output_path}")
     except Exception as e:
         logging.error(f"Failed to write HTML report: {e}")

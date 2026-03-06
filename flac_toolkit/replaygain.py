@@ -1,4 +1,5 @@
 import logging
+import sys
 from pathlib import Path
 from typing import List, Tuple
 
@@ -8,6 +9,7 @@ import soundfile as sf
 from mutagen.flac import FLAC
 
 from flac_toolkit.constants import TARGET_LOUDNESS_LUFS
+from flac_toolkit.core import flac_progress
 
 
 
@@ -40,16 +42,21 @@ def process_album(album_files: List[Path]):
     """
     Calculates and applies track and album ReplayGain to a list of files.
     """
+    from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeRemainingColumn, MofNCompleteColumn
+
     track_data = {}
     all_audio_data = []
 
     # 1. Calculate track gain for each file
-    for file_path in album_files:
-        result = _calculate_track_replaygain(file_path)
-        if result:
-            loudness, peak, audio_data = result
-            track_data[file_path] = (loudness, peak)
-            all_audio_data.append(audio_data)
+    with flac_progress("Calculating ReplayGain...") as (progress, desc):
+        task = progress.add_task(desc, total=len(album_files))
+        for file_path in album_files:
+            result = _calculate_track_replaygain(file_path)
+            if result:
+                loudness, peak, audio_data = result
+                track_data[file_path] = (loudness, peak)
+                all_audio_data.append(audio_data)
+            progress.advance(task)
 
     if not all_audio_data:
         logging.warning("✗ No valid tracks found to process for album gain.")
@@ -86,6 +93,7 @@ def process_album(album_files: List[Path]):
             audio["REPLAYGAIN_TRACK_PEAK"] = track_peak_str
             audio["REPLAYGAIN_ALBUM_GAIN"] = album_gain_str
             audio["REPLAYGAIN_ALBUM_PEAK"] = album_peak_str
+            audio["REPLAYGAIN_REFERENCE_LOUDNESS"] = f"{TARGET_LOUDNESS_LUFS:.2f} dB"
             audio.save()
             logging.info(f"  ✓ Tags applied to {file_path.name}")
         except Exception as e:
